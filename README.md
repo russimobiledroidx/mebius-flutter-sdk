@@ -36,40 +36,44 @@ Live video for Flutter — broadcast and watch real-time streams through the Meb
 
 ---
 
-## 3. Install (from GitHub)
+## 3. Install
 
-`mebius` is distributed directly from its **private** GitHub repository — there
-is no pub.dev step. Add it as a pub `git` dependency over **SSH** to your
-`pubspec.yaml`:
+Add `mebius` from pub.dev:
+
+```sh
+flutter pub add mebius
+```
+
+or add it manually to your `pubspec.yaml` and run `flutter pub get`:
+
+```yaml
+dependencies:
+  mebius: ^0.1.0
+```
+
+Then import it:
+
+```dart
+import 'package:mebius/mebius.dart';
+```
+
+<details>
+<summary>Alternative: install straight from Git</summary>
+
+You can also pin the package to a Git tag/branch/commit instead of pub.dev:
 
 ```yaml
 dependencies:
   mebius:
     git:
-      url: git@github.com:russimobiledroidx/mebius-flutter-sdk.git
+      url: https://github.com/russimobiledroidx/mebius-flutter-sdk.git
       ref: v0.1.0
 ```
 
-Then run:
+`ref` accepts any git reference — a tag (recommended for reproducible builds), a
+branch, or a full commit SHA.
 
-```sh
-flutter pub get
-```
-
-**SSH authentication (private repo).** The SSH `url` above works because the
-repo is private: it authenticates with the GitHub SSH key already configured on
-the developer's machine. Make sure you can `git clone` the repo over SSH first
-(`ssh -T git@github.com` should greet you). For **CI / build servers**, add a
-GitHub **deploy key** (a repo-scoped SSH key) to the repository and load its
-private half into the build agent's SSH agent so `flutter pub get` can fetch the
-dependency non-interactively.
-
-**`ref`** can be any git reference — a **tag** (e.g. `v0.1.0`, recommended for
-reproducible builds), a **branch** (e.g. `main`), or a full **commit SHA**.
-
-> **Future / secondary option:** once published, `mebius` may also be available
-> on pub.dev via `flutter pub add mebius` (`mebius: ^0.1.0`). Until then, use the
-> GitHub `git` dependency above.
+</details>
 
 ---
 
