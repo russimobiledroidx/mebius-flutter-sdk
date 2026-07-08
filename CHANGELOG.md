@@ -7,6 +7,9 @@ within a major version.
 ## 0.1.0
 
 - Initial release.
+- Gateway contract aligned with the Mebius stream engine: the access token is
+  passed via the `?token=` query parameter (the form the engine enforces) and
+  scale playback is served from `/live/{streamId}/index.m3u8`.
 - `Mebius.init` / `Mebius.connect` session bootstrap.
 - `MebiusClient.createBroadcaster` and `MebiusClient.createPlayer`.
 - `MebiusBroadcaster`: `start`, `stop`, `switchCamera`, `setMicEnabled`,

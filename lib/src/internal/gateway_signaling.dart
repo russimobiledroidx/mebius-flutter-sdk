@@ -4,16 +4,17 @@
 // where raw transport protocol terms are permitted. The public API hides all
 // of these behind Mebius vocabulary.
 //
-// Gateway HTTP contract (all relative to the configured `gateway` base URL):
-//   * Publish (broadcaster.start): POST {gateway}/whip/{streamId}
+// Gateway HTTP contract (all relative to the configured `gateway` base URL).
+// The engine validates the access token from the `?token=` QUERY parameter:
+//   * Publish (broadcaster.start): POST {gateway}/whip/{streamId}?token={jwt}
 //       - Body: the local SDP offer, Content-Type: application/sdp
-//       - Auth: Authorization: Bearer {token}
 //       - Response: 201 Created, body = remote SDP answer (application/sdp),
 //         Location header = resource URL used to tear the session down.
-//   * Low-latency play (player low-latency): POST {gateway}/whep/{streamId}
-//       - Same SDP/Bearer exchange as the publish path above.
-//   * Scale play (player scale): GET {gateway}/hls/{streamId}/index.m3u8
-//       - Returns the HLS playlist URL the native video pipeline consumes.
+//   * Low-latency play (player low-latency): POST {gateway}/whep/{streamId}?token={jwt}
+//       - Same SDP exchange as the publish path above.
+//   * Scale play (player scale): GET {gateway}/live/{streamId}/index.m3u8?token={jwt}
+//       - Returns the HLS playlist the native video pipeline consumes; segment
+//         URIs inside inherit ?token= automatically (engine rewrites them).
 //
 // None of these path segments or protocol names ever leak to the public API.
 
@@ -61,12 +62,24 @@ class GatewaySignaling {
         'Authorization': 'Bearer $token',
       };
 
+  // Appends the access token as a query parameter. The engine validates the
+  // token from the `?token=` query (its auth hook + playback gate read the
+  // query, not the header); the Bearer header is kept only as a courtesy for
+  // gateways that prefer it.
+  String _withToken(String url) {
+    final sep = url.contains('?') ? '&' : '?';
+    return '$url${sep}token=${Uri.encodeQueryComponent(token)}';
+  }
+
   /// Performs the WHIP SDP exchange to begin publishing [streamId].
   Future<SdpExchangeResult> publishOffer(
     String streamId,
     String offerSdp,
   ) {
-    return _sdpExchange('$_base/whip/$streamId', offerSdp);
+    return _sdpExchange(
+      _withToken('$_base/whip/${Uri.encodeComponent(streamId)}'),
+      offerSdp,
+    );
   }
 
   /// Performs the WHEP SDP exchange to begin low-latency playback of
@@ -75,12 +88,19 @@ class GatewaySignaling {
     String streamId,
     String offerSdp,
   ) {
-    return _sdpExchange('$_base/whep/$streamId', offerSdp);
+    return _sdpExchange(
+      _withToken('$_base/whep/${Uri.encodeComponent(streamId)}'),
+      offerSdp,
+    );
   }
 
   /// Returns the HLS playlist URL used by the scale playback pipeline.
+  ///
+  /// The engine serves the playlist under `/live/{id}/index.m3u8` and requires
+  /// the token in the query; segment URIs inside the playlist inherit it
+  /// automatically (the engine rewrites the manifest).
   String scalePlaylistUrl(String streamId) {
-    return '$_base/hls/$streamId/index.m3u8';
+    return _withToken('$_base/live/${Uri.encodeComponent(streamId)}/index.m3u8');
   }
 
   Future<SdpExchangeResult> _sdpExchange(String url, String offerSdp) async {
