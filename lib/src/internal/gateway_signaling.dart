@@ -94,6 +94,13 @@ class GatewaySignaling {
     );
   }
 
+  /// Returns the tokenized URL for a gateway-relative delivery path.
+  ///
+  /// Only used for paths the gateway itself handed us; the caller must have
+  /// checked `MebiusDelivery.isResolvable` first, so an absolute path never
+  /// reaches this method and the token cannot be sent to another host.
+  String deliveryUrl(String path) => _withToken('$_base$path');
+
   /// Returns the HLS playlist URL used by the scale playback pipeline.
   ///
   /// The engine serves the playlist under `/live/{id}/index.m3u8` and requires
@@ -139,11 +146,11 @@ class GatewaySignaling {
   }
 
   /// Verifies that the configured stream playlist is reachable for scale mode.
-  Future<void> ensureScaleReachable(String streamId) async {
+  Future<void> ensureScaleReachable(String streamId, [String? url]) async {
     http.Response response;
     try {
       response = await _http.get(
-        Uri.parse(scalePlaylistUrl(streamId)),
+        Uri.parse(url ?? scalePlaylistUrl(streamId)),
         headers: _authHeaders,
       );
     } catch (e) {

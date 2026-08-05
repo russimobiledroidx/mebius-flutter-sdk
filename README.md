@@ -130,8 +130,14 @@ void main() {
   runApp(const MyApp());
 }
 
-// Later, after fetching a token from your backend:
-final client = Mebius.connect(token: tokenFromBackend);
+// Later, after fetching a token from your backend. The same response carries a
+// `deliveries` list — pass it through as-is and Mebius picks the best route for
+// each viewer, falling back on its own if one stops delivering frames.
+final body = jsonDecode(response.body) as Map<String, dynamic>;
+final client = Mebius.connect(
+  token: body['token'] as String,
+  deliveries: MebiusDelivery.listFromJson(body['deliveries']),
+);
 
 client.events.listen((event) {
   switch (event.type) {
@@ -212,7 +218,7 @@ class WatchPage extends StatefulWidget {
 
 class _WatchPageState extends State<WatchPage> {
   late final MebiusPlayer _player =
-      widget.client.createPlayer(mode: MebiusPlayerMode.lowLatency);
+      widget.client.createPlayer();
 
   @override
   void initState() {
@@ -245,15 +251,38 @@ class _WatchPageState extends State<WatchPage> {
 }
 ```
 
-To switch between profiles, dispose the current player and create a new one
-with the other `MebiusPlayerMode`:
+### Playback modes
+
+| Mode | When to use |
+| --- | --- |
+| `auto` (default) | Recommended. Mebius picks per viewer and re-picks if a route stops delivering. |
+| `lowLatency` | Two-way interaction (co-broadcast), sub-second delay. Costs a per-viewer session, so it is not for a plain audience. |
+| `scale` | Largest audiences and unstable networks. |
+
+To switch, dispose the current player and create a new one:
 
 ```dart
-// Latency-optimized:
-client.createPlayer(mode: MebiusPlayerMode.lowLatency);
-// Scale-optimized (large audiences / unstable networks):
-client.createPlayer(mode: MebiusPlayerMode.scale);
+client.createPlayer();                                  // auto
+client.createPlayer(mode: MebiusPlayerMode.scale);      // scale
 ```
+
+### Watching the other side of a co-broadcast
+
+```dart
+final monitor = client.createMonitor();
+await monitor.play(opponentStreamId);
+```
+
+Same API as a player, different delay budget: it starts on the real-time route
+and moves to another by itself if no frame arrives within 8 seconds.
+
+### `deliveries`
+
+`Mebius.connect` accepts the `deliveries` list your backend returned with the
+token. Pass it through untouched — `kind` and `path` are opaque, and Mebius
+decides the ordering. It is optional, but without it every viewer is served from
+Mebius origin instead of the nearest edge, and on mobile that is billed per
+viewer.
 
 A full, copy-paste example with both screens, camera switching, mute,
 mode-toggling and a volume slider lives in [`example/lib/main.dart`](example/lib/main.dart).
@@ -265,9 +294,11 @@ mode-toggling and a volume slider lives in [`example/lib/main.dart`](example/lib
 | Member | Dart signature | Description |
 | --- | --- | --- |
 | `Mebius.init` | `static void init({required String appId, required String gateway})` | Configure the SDK once at startup. |
-| `Mebius.connect` | `static MebiusClient connect({required String token})` | Open an authenticated session. |
+| `Mebius.connect` | `static MebiusClient connect({required String token, List<MebiusDelivery> deliveries = const []})` | Open an authenticated session. |
 | `MebiusClient.createBroadcaster` | `MebiusBroadcaster createBroadcaster({bool video = true, bool audio = true})` | Create a broadcaster. |
-| `MebiusClient.createPlayer` | `MebiusPlayer createPlayer({MebiusPlayerMode mode = MebiusPlayerMode.lowLatency})` | Create a player. |
+| `MebiusClient.createPlayer` | `MebiusPlayer createPlayer({MebiusPlayerMode mode = MebiusPlayerMode.auto})` | Create a player. |
+| `MebiusClient.createMonitor` | `MebiusPlayer createMonitor()` | Player for a stream you interact with. |
+| `MebiusDelivery.listFromJson` | `static List<MebiusDelivery> listFromJson(Object? json)` | Parse the `deliveries` array from your token response. |
 | `MebiusClient.disconnect` | `Future<void> disconnect()` | End the session and release everything. |
 | `MebiusClient.events` | `Stream<MebiusClientEvent> events` | `connected` / `disconnected` / `error`. |
 | `MebiusBroadcaster.start` | `Future<void> start(String streamId)` | Begin broadcasting. |

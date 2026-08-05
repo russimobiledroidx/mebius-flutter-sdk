@@ -1,11 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:mebius/mebius.dart';
 
-/// Replace these with values for your Mebius account and a token minted by
-/// your backend. The client never holds your app secret.
+/// Replace these with values for your Mebius account and credentials minted by
+/// your backend. The client never holds your secret key.
 const String kAppId = 'your-app-id';
 const String kGateway = 'https://gateway.mebius.example';
 const String kToken = 'paste-a-short-lived-token-from-your-backend';
+
+/// The `deliveries` list your backend received alongside the token.
+///
+/// Paste it through untouched — `kind` is a Mebius intent label, not a media
+/// format, and `path` is resolved by Mebius. Leaving it empty still plays, but
+/// every viewer is served from Mebius origin instead of the nearest edge, and on
+/// mobile that is billed per viewer.
+///
+/// Example of the shape your backend returns:
+///   [ {"kind": "wide", "path": "/d/wide/room-42"},
+///     {"kind": "local", "path": "/live/room-42/index.m3u8"} ]
+const List<MebiusDelivery> kDeliveries = <MebiusDelivery>[];
 
 void main() {
   // Configure the SDK once, before the app starts.
@@ -41,7 +53,7 @@ class _HomeScreenState extends State<HomeScreen> {
   MebiusClient? _client;
 
   MebiusClient _ensureClient() {
-    return _client ??= Mebius.connect(token: kToken);
+    return _client ??= Mebius.connect(token: kToken, deliveries: kDeliveries);
   }
 
   @override
@@ -231,7 +243,7 @@ class WatchScreen extends StatefulWidget {
 class _WatchScreenState extends State<WatchScreen> {
   final TextEditingController _streamId =
       TextEditingController(text: 'demo-stream');
-  MebiusPlayerMode _mode = MebiusPlayerMode.lowLatency;
+  MebiusPlayerMode _mode = MebiusPlayerMode.auto;
   MebiusPlayer? _player;
   bool _playing = false;
   double _volume = 1;
@@ -316,6 +328,10 @@ class _WatchScreenState extends State<WatchScreen> {
           ),
           SegmentedButton<MebiusPlayerMode>(
             segments: const [
+              ButtonSegment(
+                value: MebiusPlayerMode.auto,
+                label: Text('Auto'),
+              ),
               ButtonSegment(
                 value: MebiusPlayerMode.lowLatency,
                 label: Text('Low latency'),

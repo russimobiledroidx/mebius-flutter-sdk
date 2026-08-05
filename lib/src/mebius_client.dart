@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/mebius_broadcaster.dart';
+import 'package:mebius/src/mebius_delivery.dart';
 import 'package:mebius/src/mebius_error.dart';
 import 'package:mebius/src/mebius_events.dart';
 import 'package:mebius/src/mebius_player.dart';
@@ -26,7 +27,9 @@ class MebiusClient {
   MebiusClient.internal({
     required String gateway,
     required String token,
-  }) : _signaling = GatewaySignaling(gateway: gateway, token: token) {
+    List<MebiusDelivery> deliveries = const <MebiusDelivery>[],
+  })  : _deliveries = deliveries,
+        _signaling = GatewaySignaling(gateway: gateway, token: token) {
     // Connection to the gateway is established lazily on first publish/play,
     // but we surface a `connected` event immediately so applications can wire
     // up their UI deterministically.
@@ -37,6 +40,7 @@ class MebiusClient {
   }
 
   final GatewaySignaling _signaling;
+  final List<MebiusDelivery> _deliveries;
   final StreamController<MebiusClientEvent> _events =
       StreamController<MebiusClientEvent>.broadcast();
   final List<MebiusBroadcaster> _broadcasters = [];
@@ -77,16 +81,34 @@ class MebiusClient {
 
   /// Creates a player bound to this client's connection.
   ///
-  /// The [mode] selects the playback strategy. The underlying delivery
-  /// pipeline is chosen automatically.
+  /// The [mode] selects the playback strategy; the underlying delivery route is
+  /// chosen automatically and re-chosen if it stops delivering frames.
+  ///
+  /// The default changed from `lowLatency` to [MebiusPlayerMode.auto]: a plain
+  /// viewer does not need a real-time connection, and defaulting to one spent a
+  /// per-viewer server session on every audience member.
   MebiusPlayer createPlayer({
-    MebiusPlayerMode mode = MebiusPlayerMode.lowLatency,
+    MebiusPlayerMode mode = MebiusPlayerMode.auto,
   }) {
     _ensureConnected();
-    final player = MebiusPlayer.internal(signaling: _signaling, mode: mode);
+    final player = MebiusPlayer.internal(
+      signaling: _signaling,
+      mode: mode,
+      deliveries: _deliveries,
+    );
     _players.add(player);
     return player;
   }
+
+  /// Creates a player for a stream you are interacting WITH — the other side of
+  /// a co-broadcast — where a second of delay makes the interaction feel broken.
+  ///
+  /// Same API as a player; only the delay budget differs. It starts on the
+  /// real-time route and falls back by itself if that route sends no frames,
+  /// which is the part apps used to hand-roll and get wrong in front of a live
+  /// audience.
+  MebiusPlayer createMonitor() =>
+      createPlayer(mode: MebiusPlayerMode.lowLatency);
 
   /// Disconnects from the gateway and releases all broadcasters and players
   /// created by this client.

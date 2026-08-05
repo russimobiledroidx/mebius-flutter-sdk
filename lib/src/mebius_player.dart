@@ -2,11 +2,16 @@ import 'dart:async';
 
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/internal/playback_engine.dart';
+import 'package:mebius/src/mebius_delivery.dart';
 import 'package:mebius/src/mebius_error.dart';
 import 'package:mebius/src/mebius_events.dart';
 
 /// Selects the playback strategy used by a [MebiusPlayer].
 enum MebiusPlayerMode {
+  /// Let Mebius choose per viewer, and fall back on its own if the chosen route
+  /// stops delivering frames. The recommended default.
+  auto,
+
   /// Optimized for the lowest possible glass-to-glass latency. Best for
   /// interactive use cases such as auctions, betting or two-way experiences.
   lowLatency,
@@ -22,7 +27,7 @@ enum MebiusPlayerMode {
 /// passing this instance to a `MebiusView`.
 ///
 /// ```dart
-/// final player = client.createPlayer(mode: MebiusPlayerMode.lowLatency);
+/// final player = client.createPlayer(); // mode defaults to auto
 /// player.events.listen((event) {
 ///   if (event.type == MebiusPlayerEventType.playing) {
 ///     // Video is rendering.
@@ -35,12 +40,15 @@ class MebiusPlayer {
   MebiusPlayer.internal({
     required GatewaySignaling signaling,
     required this.mode,
+    List<MebiusDelivery> deliveries = const <MebiusDelivery>[],
   }) : _engine = PlaybackEngine(
           signaling: signaling,
           pipeline: mode == MebiusPlayerMode.lowLatency
               ? PlaybackPipeline.lowLatency
               : PlaybackPipeline.scale,
-        );
+        ) {
+    _engine.deliveries = deliveries;
+  }
 
   /// The playback mode this player was created with.
   final MebiusPlayerMode mode;
