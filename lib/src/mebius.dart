@@ -1,4 +1,5 @@
 import 'package:mebius/src/mebius_client.dart';
+import 'package:mebius/src/mebius_delivery.dart';
 import 'package:mebius/src/mebius_error.dart';
 
 /// The entry point to the Mebius SDK.
@@ -59,7 +60,14 @@ abstract final class Mebius {
   ///
   /// Throws a [MebiusError] with [MebiusErrorCode.unknown] if [init] has not
   /// been called.
-  static MebiusClient connect({required String token}) {
+  /// [deliveries] is the list your backend returned with the token. Pass it
+  /// through as-is: Mebius orders it and picks from it. Optional — without it
+  /// playback still works, but every viewer is served from Mebius origin rather
+  /// than the nearest edge, which on mobile is billed per viewer.
+  static MebiusClient connect({
+    required String token,
+    List<MebiusDelivery> deliveries = const <MebiusDelivery>[],
+  }) {
     if (!isInitialized) {
       throw const MebiusError(
         MebiusErrorCode.unknown,
@@ -72,7 +80,11 @@ abstract final class Mebius {
         'A connection token is required. Mint one from your backend.',
       );
     }
-    return MebiusClient.internal(gateway: _gateway!, token: token);
+    return MebiusClient.internal(
+      gateway: _gateway!,
+      token: token,
+      deliveries: deliveries,
+    );
   }
 
   /// Resets SDK configuration. Intended for tests.

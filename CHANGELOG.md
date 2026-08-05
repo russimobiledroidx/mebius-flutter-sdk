@@ -1,3 +1,25 @@
+## 0.2.0
+
+- `Mebius.connect` accepts `deliveries`, the route list your backend receives
+  with the access token. Pass it through as-is; Mebius orders it and picks from
+  it. Without it every viewer is served from Mebius origin instead of the nearest
+  edge — on mobile that is a per-viewer bill rather than none.
+- New `MebiusPlayerMode.auto`, and `createPlayer()` now defaults to it. The old
+  default was `lowLatency`, which opened a per-viewer real-time session for every
+  audience member; only a monitor needs one.
+- Playback walks an ordered route list with an 8-second first-frame budget per
+  route. A route that opens successfully is not yet a route that plays: an edge
+  with no ingest answers 200 with an empty stream, and a WebRTC connection reports
+  `connected` while zero frames arrive. Previously either case left the viewer on
+  a black frame with no error to react to.
+- New `client.createMonitor()` for watching the other side of a co-broadcast.
+- New `MebiusDelivery` with `listFromJson`, which skips malformed entries instead
+  of throwing, and `isResolvable`, which refuses any path that would send the
+  access token to a host Mebius did not choose.
+- The buffered mid-latency route is deliberately not offered on Flutter: the
+  platform player cannot play it, so declaring it would be a mode that can never
+  work.
+
 # Changelog
 
 All notable changes to the `mebius` package are documented here. This project
