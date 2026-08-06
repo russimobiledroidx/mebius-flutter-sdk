@@ -1,3 +1,12 @@
+## 0.2.1
+
+- A broadcast published from this SDK now reaches viewers who are not on the
+  real-time route. libwebrtc negotiated VP8, which the gateway's segment-based
+  deliveries cannot carry — they dropped the video track, so those viewers got
+  audio only while the device showed a healthy preview and bitrate the whole
+  time. The publishing transceiver now prefers H264, with VP8 kept as the
+  fallback for a device that cannot encode H264.
+
 ## 0.2.0
 
 - `Mebius.connect` accepts `deliveries`, the route list your backend receives
