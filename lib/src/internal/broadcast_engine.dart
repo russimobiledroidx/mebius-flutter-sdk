@@ -69,6 +69,8 @@ class BroadcastEngine {
       await pc.addTrack(track, _localStream!);
     }
 
+    await preferH264(pc);
+
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
@@ -148,3 +150,34 @@ class BroadcastEngine {
     return {'bitrate': bitrate, 'fps': fps, 'packets': packets};
   }
 }
+
+/// Offers H264 ahead of VP8 for the outgoing video track.
+///
+/// libwebrtc negotiates VP8 by default, and VP8 is a dead end for every viewer
+/// who is not on the real-time route: the gateway's segment-based deliveries
+/// cannot carry it, so they drop the video track and the broadcast arrives as
+/// audio only. The device shows a healthy preview and bitrate throughout, which
+/// is what makes this worth doing here rather than diagnosing it per report.
+///
+/// VP8 stays in the list as the fallback — a device with no H264 encoder must
+/// still be able to broadcast.
+///
+/// Best-effort: any failure leaves negotiation exactly as it was before.
+Future<void> preferH264(RTCPeerConnection pc) async {
+  try {
+    final transceivers = await pc.getTransceivers();
+    for (final t in transceivers) {
+      if (t.sender.track?.kind != 'video') continue;
+      await t.setCodecPreferences(h264FirstCodecs);
+    }
+  } on Object catch (_) {
+    // Older plugin versions and platforms without the method call: the
+    // broadcast still goes out, just with the previous codec order.
+  }
+}
+
+/// Codec preference list applied to the publishing video transceiver.
+final List<RTCRtpCodecCapability> h264FirstCodecs = <RTCRtpCodecCapability>[
+  RTCRtpCodecCapability(mimeType: 'video/H264', clockRate: 90000),
+  RTCRtpCodecCapability(mimeType: 'video/VP8', clockRate: 90000),
+];
