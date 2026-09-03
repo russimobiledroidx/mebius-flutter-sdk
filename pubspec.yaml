@@ -1,6 +1,6 @@
 name: mebius
 description: Mebius live video SDK for Flutter — broadcast and watch real-time streams through the Mebius gateway with a single, simple API.
-version: 0.2.1
+version: 0.2.2
 repository: https://github.com/russimobiledroidx/mebius-flutter-sdk
 homepage: https://github.com/russimobiledroidx/mebius-flutter-sdk
 issue_tracker: https://github.com/russimobiledroidx/mebius-flutter-sdk/issues
