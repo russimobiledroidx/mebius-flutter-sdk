@@ -74,5 +74,45 @@ void main() {
     test('is zero on an empty snapshot', () {
       expect(decodedVideoFrames(const <StatsReport>[]), 0);
     });
+
+    test('does not fall back when framesDecoded is present and zero', () {
+      // Present-and-zero is a real answer: media has arrived but nothing has
+      // decoded, which is precisely the stall we must keep waiting through.
+      // Falling back to framesReceived here would declare it playing.
+      final reports = [
+        report('inbound-rtp', {
+          'kind': 'video',
+          'framesDecoded': 0,
+          'framesReceived': 5,
+        }),
+      ];
+
+      expect(decodedVideoFrames(reports), 0);
+    });
+
+    test('sums every inbound video report rather than trusting the first', () {
+      // getStats() ordering is unspecified — Android builds the report from a
+      // hash map. Returning on the first video entry meant a session with two
+      // of them could answer 0 while video was flowing, and fail over a route
+      // that was working.
+      final reports = [
+        report('inbound-rtp', {'kind': 'video', 'framesDecoded': 0}),
+        report('inbound-rtp', {'kind': 'video', 'framesDecoded': 9}),
+      ];
+
+      expect(decodedVideoFrames(reports), 9);
+    });
+
+    test('accepts mediaType where a platform omits kind', () {
+      // `kind` is the spec field and current libwebrtc emits it. If a platform
+      // ever sends only the legacy alias, matching `kind` alone fails silently:
+      // no report matches, every real-time route fails over forever, and
+      // nothing logs why.
+      final reports = [
+        report('inbound-rtp', {'mediaType': 'video', 'framesDecoded': 4}),
+      ];
+
+      expect(decodedVideoFrames(reports), 4);
+    });
   });
 }

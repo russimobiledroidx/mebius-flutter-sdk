@@ -86,23 +86,40 @@ List<PlaybackCandidate> buildCandidates(
 ///
 /// `framesReceived` is accepted where `framesDecoded` is missing, because not
 /// every platform reports the latter and frames arriving is still proof that
-/// media is flowing. A report with neither counts as zero: not proven must not
-/// read as playing.
+/// media is flowing. Note the `??`: present-and-zero is a real answer and does
+/// NOT fall back — media arriving with nothing decoded is exactly the stall we
+/// must keep waiting through. A report with neither counter counts as zero: not
+/// proven must not read as playing.
+///
+/// ponytail: `framesReceived` counts frames assembled before decode, so
+/// `framesReceived > 0 && framesDecoded == 0` is what a stream missing a
+/// keyframe or carrying a codec this device cannot decode looks like — the 0.2.1
+/// failure mode, one release ago. Every platform this SDK targets does report
+/// `framesDecoded`, so the fallback is near-dead code; drop it if a platform
+/// without the counter never shows up.
+///
+/// Every inbound video report is summed rather than trusting the first: report
+/// ordering is unspecified (Android builds it from a hash map), so a session
+/// with two video entries could otherwise answer 0 while video was flowing and
+/// fail over a route that was working.
 ///
 /// Only inbound video is counted. A monitor publishes and plays on one device,
 /// so counting the outbound side would report a frame for a route that received
-/// none.
+/// none. `mediaType` is accepted alongside `kind` because matching only the spec
+/// field would fail silently on a platform that emits just the legacy alias: no
+/// report matches, every real-time route fails over, and nothing says why.
 int decodedVideoFrames(List<StatsReport> reports) {
+  var total = 0;
   for (final r in reports) {
     if (r.type != 'inbound-rtp') continue;
     final values = r.values;
-    if (values['kind'] != 'video') continue;
+    if ((values['kind'] ?? values['mediaType']) != 'video') continue;
     final decoded = values['framesDecoded'] ?? values['framesReceived'];
     if (decoded is num) {
-      return decoded.toInt();
+      total += decoded.toInt();
     }
   }
-  return 0;
+  return total;
 }
 
 /// Drives inbound playback for a single stream.
@@ -187,7 +204,10 @@ class PlaybackEngine {
       }
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
-    return _hasFrame();
+    // No last look: the loop already polled to within 200ms of the deadline, so
+    // another round trip fires after the budget is spent and can only repeat the
+    // answer we just had.
+    return false;
   }
 
   Future<bool> _hasFrame() async {
@@ -204,7 +224,18 @@ class PlaybackEngine {
     if (pc == null) {
       return false;
     }
-    return decodedVideoFrames(await pc.getStats()) > 0;
+    try {
+      return decodedVideoFrames(await pc.getStats()) > 0;
+    } on Object catch (_) {
+      // flutter_webrtc throws a bare String from native getStats, and iOS throws
+      // when the connection has left the plugin registry — which is reachable
+      // because stop() is public and can land mid-poll. Left uncaught it becomes
+      // the caller's error: MebiusError.from maps a non-MebiusError to
+      // MebiusErrorCode.unknown with toString() as the user-facing message, so a
+      // stats hiccup leaked an internal libwebrtc string and reported UNKNOWN
+      // where CONNECTION_FAILED was the truth. Unavailable stats is not playing.
+      return false;
+    }
   }
 
   Future<void> _startLowLatency(String streamId) async {
@@ -268,7 +299,13 @@ class PlaybackEngine {
     if (resource != null) {
       await signaling.deleteResource(resource);
     }
+    // dispose() as well as close(): only dispose removes the connection from the
+    // plugin's registry. Pre-existing, but this fix is what makes it reachable —
+    // the real-time route used to always report success, so failover never ran
+    // and no connection was ever abandoned. Now every viewer on a dead route
+    // would leak one for the session.
     await _pc?.close();
+    await _pc?.dispose();
     _pc = null;
     _remoteStream = null;
 
