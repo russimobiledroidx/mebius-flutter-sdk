@@ -77,6 +77,34 @@ List<PlaybackCandidate> buildCandidates(
   return out;
 }
 
+/// Video frames the decoder has actually produced, from a `getStats()` snapshot.
+///
+/// This is the honest answer to "is it playing?". The alternatives all lie: a
+/// peer connection reports `connected`, and a video track reports `enabled`,
+/// from the moment the session is negotiated — both stay true forever on a route
+/// that never sends a single frame.
+///
+/// `framesReceived` is accepted where `framesDecoded` is missing, because not
+/// every platform reports the latter and frames arriving is still proof that
+/// media is flowing. A report with neither counts as zero: not proven must not
+/// read as playing.
+///
+/// Only inbound video is counted. A monitor publishes and plays on one device,
+/// so counting the outbound side would report a frame for a route that received
+/// none.
+int decodedVideoFrames(List<StatsReport> reports) {
+  for (final r in reports) {
+    if (r.type != 'inbound-rtp') continue;
+    final values = r.values;
+    if (values['kind'] != 'video') continue;
+    final decoded = values['framesDecoded'] ?? values['framesReceived'];
+    if (decoded is num) {
+      return decoded.toInt();
+    }
+  }
+  return 0;
+}
+
 /// Drives inbound playback for a single stream.
 class PlaybackEngine {
   PlaybackEngine({required this.signaling, required this.pipeline});
@@ -154,7 +182,7 @@ class PlaybackEngine {
   Future<bool> _awaitFirstFrame() async {
     final deadline = DateTime.now().add(kFirstFrameTimeout);
     while (DateTime.now().isBefore(deadline)) {
-      if (_hasFrame()) {
+      if (await _hasFrame()) {
         return true;
       }
       await Future<void>.delayed(const Duration(milliseconds: 200));
@@ -162,16 +190,21 @@ class PlaybackEngine {
     return _hasFrame();
   }
 
-  bool _hasFrame() {
+  Future<bool> _hasFrame() async {
     final controller = _videoController;
     if (controller != null) {
       final v = controller.value;
       return v.isInitialized && v.position > Duration.zero;
     }
-    // For the WebRTC route the arrival of a live video track is the frame
-    // signal; getStats reports frames only after decoding has begun.
-    final tracks = _remoteStream?.getVideoTracks() ?? <MediaStreamTrack>[];
-    return tracks.any((t) => t.enabled);
+    // For the WebRTC route, ask the decoder. A track object is not evidence: it
+    // exists from the moment the session is negotiated, so reading it as "a
+    // frame arrived" defused the very watchdog that was meant to catch a route
+    // which connects and then sends nothing.
+    final pc = _pc;
+    if (pc == null) {
+      return false;
+    }
+    return decodedVideoFrames(await pc.getStats()) > 0;
   }
 
   Future<void> _startLowLatency(String streamId) async {
