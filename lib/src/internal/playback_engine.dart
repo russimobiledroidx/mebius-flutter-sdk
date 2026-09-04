@@ -77,6 +77,51 @@ List<PlaybackCandidate> buildCandidates(
   return out;
 }
 
+/// Video frames the decoder has actually produced, from a `getStats()` snapshot.
+///
+/// This is the honest answer to "is it playing?". The alternatives all lie: a
+/// peer connection reports `connected`, and a video track reports `enabled`,
+/// from the moment the session is negotiated — both stay true forever on a route
+/// that never sends a single frame.
+///
+/// `framesReceived` is accepted where `framesDecoded` is missing, because not
+/// every platform reports the latter and frames arriving is still proof that
+/// media is flowing. Note the `??`: present-and-zero is a real answer and does
+/// NOT fall back — media arriving with nothing decoded is exactly the stall we
+/// must keep waiting through. A report with neither counter counts as zero: not
+/// proven must not read as playing.
+///
+/// ponytail: `framesReceived` counts frames assembled before decode, so
+/// `framesReceived > 0 && framesDecoded == 0` is what a stream missing a
+/// keyframe or carrying a codec this device cannot decode looks like — the 0.2.1
+/// failure mode, one release ago. Every platform this SDK targets does report
+/// `framesDecoded`, so the fallback is near-dead code; drop it if a platform
+/// without the counter never shows up.
+///
+/// Every inbound video report is summed rather than trusting the first: report
+/// ordering is unspecified (Android builds it from a hash map), so a session
+/// with two video entries could otherwise answer 0 while video was flowing and
+/// fail over a route that was working.
+///
+/// Only inbound video is counted. A monitor publishes and plays on one device,
+/// so counting the outbound side would report a frame for a route that received
+/// none. `mediaType` is accepted alongside `kind` because matching only the spec
+/// field would fail silently on a platform that emits just the legacy alias: no
+/// report matches, every real-time route fails over, and nothing says why.
+int decodedVideoFrames(List<StatsReport> reports) {
+  var total = 0;
+  for (final r in reports) {
+    if (r.type != 'inbound-rtp') continue;
+    final values = r.values;
+    if ((values['kind'] ?? values['mediaType']) != 'video') continue;
+    final decoded = values['framesDecoded'] ?? values['framesReceived'];
+    if (decoded is num) {
+      total += decoded.toInt();
+    }
+  }
+  return total;
+}
+
 /// Drives inbound playback for a single stream.
 class PlaybackEngine {
   PlaybackEngine({required this.signaling, required this.pipeline});
@@ -154,24 +199,43 @@ class PlaybackEngine {
   Future<bool> _awaitFirstFrame() async {
     final deadline = DateTime.now().add(kFirstFrameTimeout);
     while (DateTime.now().isBefore(deadline)) {
-      if (_hasFrame()) {
+      if (await _hasFrame()) {
         return true;
       }
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
-    return _hasFrame();
+    // No last look: the loop already polled to within 200ms of the deadline, so
+    // another round trip fires after the budget is spent and can only repeat the
+    // answer we just had.
+    return false;
   }
 
-  bool _hasFrame() {
+  Future<bool> _hasFrame() async {
     final controller = _videoController;
     if (controller != null) {
       final v = controller.value;
       return v.isInitialized && v.position > Duration.zero;
     }
-    // For the WebRTC route the arrival of a live video track is the frame
-    // signal; getStats reports frames only after decoding has begun.
-    final tracks = _remoteStream?.getVideoTracks() ?? <MediaStreamTrack>[];
-    return tracks.any((t) => t.enabled);
+    // For the WebRTC route, ask the decoder. A track object is not evidence: it
+    // exists from the moment the session is negotiated, so reading it as "a
+    // frame arrived" defused the very watchdog that was meant to catch a route
+    // which connects and then sends nothing.
+    final pc = _pc;
+    if (pc == null) {
+      return false;
+    }
+    try {
+      return decodedVideoFrames(await pc.getStats()) > 0;
+    } on Object catch (_) {
+      // flutter_webrtc throws a bare String from native getStats, and iOS throws
+      // when the connection has left the plugin registry — which is reachable
+      // because stop() is public and can land mid-poll. Left uncaught it becomes
+      // the caller's error: MebiusError.from maps a non-MebiusError to
+      // MebiusErrorCode.unknown with toString() as the user-facing message, so a
+      // stats hiccup leaked an internal libwebrtc string and reported UNKNOWN
+      // where CONNECTION_FAILED was the truth. Unavailable stats is not playing.
+      return false;
+    }
   }
 
   Future<void> _startLowLatency(String streamId) async {
@@ -235,7 +299,13 @@ class PlaybackEngine {
     if (resource != null) {
       await signaling.deleteResource(resource);
     }
+    // dispose() as well as close(): only dispose removes the connection from the
+    // plugin's registry. Pre-existing, but this fix is what makes it reachable —
+    // the real-time route used to always report success, so failover never ran
+    // and no connection was ever abandoned. Now every viewer on a dead route
+    // would leak one for the session.
     await _pc?.close();
+    await _pc?.dispose();
     _pc = null;
     _remoteStream = null;
 

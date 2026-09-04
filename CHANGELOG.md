@@ -1,3 +1,26 @@
+## 0.2.2
+
+- A viewer no longer gets stuck on a black frame when the real-time route
+  connects but sends nothing. The 8-second first-frame budget existed for
+  exactly that case, but the check behind it asked whether a video track was
+  present and enabled — true from the moment the session is negotiated, and true
+  forever after, whether or not a single frame follows. So the route always
+  reported success, playback never moved on to the next route, and there was no
+  error to react to. Playback now waits for the decoder to actually produce a
+  frame.
+- A route that walks away is released properly. Failover never ran before this
+  fix, so a peer connection was never abandoned; now that it can be, the
+  connection is disposed rather than merely closed.
+- A hiccup reading playback statistics no longer surfaces as an `unknown` error
+  carrying an internal message. It is treated as "not playing yet", which is
+  what it means.
+
+Known limitation, unchanged: a broadcast with no camera — audio only — cannot be
+played on the real-time route, on any Mebius SDK. Audio arrives, but the
+first-frame budget is waiting for a picture that never comes, so playback falls
+through to the buffered routes and then reports a connection failure. Publish
+with video if you need the real-time route.
+
 ## 0.2.1
 
 - A broadcast published from this SDK now reaches viewers who are not on the
