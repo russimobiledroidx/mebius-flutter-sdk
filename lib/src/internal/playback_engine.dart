@@ -327,21 +327,42 @@ class PlaybackEngine {
   }
 
   /// Collects a lightweight stats snapshot from the active session.
+  ///
+  /// Carries a `progress` entry alongside the reportable numbers: a monotonic
+  /// count of how far playback has actually got, which is the only evidence
+  /// Flutter has that a route is still alive. Neither pipeline reports its own
+  /// death — the platform player holds its last frame and goes on claiming to be
+  /// initialized, and a peer connection reports `connected` long after the far
+  /// end stopped sending — but both of these counters only move while media is
+  /// arriving. It rides along with the stats rather than being read separately,
+  /// because on the real-time route that would mean a second native `getStats`
+  /// every tick for one integer.
+  ///
+  /// `progress` is -1 when it could not be read. Not 0: a stats call that throws
+  /// says nothing about the stream, and 0 would read as the playhead jumping
+  /// backwards to whatever is comparing successive values.
   Future<Map<String, num>> readStats() async {
     final pc = _pc;
     if (pc != null) {
       var bitrate = 0.0;
       var fps = 0.0;
-      final reports = await pc.getStats();
-      for (final r in reports) {
-        if (r.type == 'inbound-rtp') {
-          final values = r.values;
-          fps = (values['framesPerSecond'] as num?)?.toDouble() ?? fps;
-          final bytes = (values['bytesReceived'] as num?)?.toDouble() ?? 0;
-          bitrate = bytes * 8 / 1000;
+      var progress = -1;
+      try {
+        final reports = await pc.getStats();
+        for (final r in reports) {
+          if (r.type == 'inbound-rtp') {
+            final values = r.values;
+            fps = (values['framesPerSecond'] as num?)?.toDouble() ?? fps;
+            final bytes = (values['bytesReceived'] as num?)?.toDouble() ?? 0;
+            bitrate = bytes * 8 / 1000;
+          }
         }
+        progress = decodedVideoFrames(reports);
+      } on Object catch (_) {
+        // Same reasoning as _hasFrame: flutter_webrtc throws a bare String from
+        // native getStats, and stop() is public enough to land mid-poll.
       }
-      return {'bitrate': bitrate, 'fps': fps, 'buffered': 0};
+      return {'bitrate': bitrate, 'fps': fps, 'buffered': 0, 'progress': progress};
     }
     final controller = _videoController;
     if (controller != null && controller.value.isInitialized) {
@@ -350,7 +371,12 @@ class PlaybackEngine {
         buffered = controller.value.buffered.last.end.inMilliseconds -
             controller.value.position.inMilliseconds;
       }
-      return {'bitrate': 0, 'fps': 0, 'buffered': buffered};
+      return {
+        'bitrate': 0,
+        'fps': 0,
+        'buffered': buffered,
+        'progress': controller.value.position.inMilliseconds,
+      };
     }
     return const {};
   }
