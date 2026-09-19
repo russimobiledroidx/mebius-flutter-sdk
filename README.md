@@ -278,6 +278,14 @@ class _WatchPageState extends State<WatchPage> {
 | `lowLatency` | Two-way interaction (co-broadcast), sub-second delay. Costs a per-viewer session, so it is not for a plain audience. |
 | `scale` | Largest audiences and unstable networks. |
 
+Mebius keeps watching the route it picked. One that stops delivering — an edge
+restarting, the publisher reconnecting, the device changing network — is
+reopened by the player itself: it reports buffering, walks the route list again,
+and reports playing once a route is serving. Only after five bounded attempts
+does it give up and report the end. So an app does not need its own restart loop
+for a long watch: handle buffering/playing for the spinner and the end for the
+end.
+
 To switch, dispose the current player and create a new one:
 
 ```dart

@@ -3,6 +3,11 @@ include: package:very_good_analysis/analysis_options.yaml
 analyzer:
   exclude:
     - example/**
+    # Flutter adds this itself the moment it resolves example/ ("Upgrading
+    # analysis_options.yaml to exclude build and platform directories"), which
+    # left the tree dirty and failed `pub publish --dry-run` on "1 checked-in
+    # file is modified in git". Written down here, its edit is a no-op.
+    - build/**
   language:
     strict-casts: true
     strict-inference: true
