@@ -12,6 +12,13 @@ enum MebiusClientEventType {
   /// The client encountered an error. The accompanying event carries a
   /// [MebiusError].
   error,
+
+  /// A fresh access token was fetched and is now in use.
+  ///
+  /// Purely informational: publishing and playback continue uninterrupted and
+  /// nothing needs to be done in response. Useful for logging that an
+  /// unattended long-running session is still renewing itself.
+  tokenRefreshed,
 }
 
 /// Lifecycle states emitted by a `MebiusBroadcaster`.

@@ -117,6 +117,25 @@ The SDK never holds your app secret. Your backend mints a **short-lived token**
 to `Mebius.connect`. When the token expires the client emits an `error` event
 with code `TOKEN_EXPIRED`; refresh the token from your backend and reconnect.
 
+**Sessions longer than one token.** Pass `getToken` and the SDK renews the
+credential shortly *before* `exp`, swapping it in place — no reconnect, no
+renegotiation, no gap on screen. A failing provider is retried with backoff
+while the current token is still valid, so `TOKEN_EXPIRED` means the credential
+genuinely ran out. Each renewal emits `MebiusClientEventType.tokenRefreshed`.
+Use `client.updateToken(newToken)` to do the same swap by hand.
+
+```dart
+final client = Mebius.connect(
+  token: await backend.mintToken(),
+  getToken: () => backend.mintToken(), // optional; omit for 0.2.x behaviour
+);
+```
+
+This matters most to a camera publisher: a match longer than the token's life is
+the difference between a seamless broadcast and a visible reconnect. Without
+`getToken` nothing changes — no renewal is scheduled and expiry surfaces exactly
+when it always did.
+
 ### Initialize and connect
 
 ```dart
@@ -294,13 +313,14 @@ mode-toggling and a volume slider lives in [`example/lib/main.dart`](example/lib
 | Member | Dart signature | Description |
 | --- | --- | --- |
 | `Mebius.init` | `static void init({required String appId, required String gateway})` | Configure the SDK once at startup. |
-| `Mebius.connect` | `static MebiusClient connect({required String token, List<MebiusDelivery> deliveries = const []})` | Open an authenticated session. |
+| `Mebius.connect` | `static MebiusClient connect({required String token, List<MebiusDelivery> deliveries = const [], Future<String> Function()? getToken})` | Open an authenticated session. `getToken` renews the credential before it expires. |
+| `MebiusClient.updateToken` | `void updateToken(String token)` | Swap the credential in place. Throws for an empty token or one scoped to another stream. |
 | `MebiusClient.createBroadcaster` | `MebiusBroadcaster createBroadcaster({bool video = true, bool audio = true})` | Create a broadcaster. |
 | `MebiusClient.createPlayer` | `MebiusPlayer createPlayer({MebiusPlayerMode mode = MebiusPlayerMode.auto})` | Create a player. |
 | `MebiusClient.createMonitor` | `MebiusPlayer createMonitor()` | Player for a stream you interact with. |
 | `MebiusDelivery.listFromJson` | `static List<MebiusDelivery> listFromJson(Object? json)` | Parse the `deliveries` array from your token response. |
 | `MebiusClient.disconnect` | `Future<void> disconnect()` | End the session and release everything. |
-| `MebiusClient.events` | `Stream<MebiusClientEvent> events` | `connected` / `disconnected` / `error`. |
+| `MebiusClient.events` | `Stream<MebiusClientEvent> events` | `connected` / `disconnected` / `error` / `tokenRefreshed`. |
 | `MebiusBroadcaster.start` | `Future<void> start(String streamId)` | Begin broadcasting. |
 | `MebiusBroadcaster.stop` | `Future<void> stop()` | Stop broadcasting. |
 | `MebiusBroadcaster.switchCamera` | `Future<void> switchCamera()` | Flip front/back camera. |

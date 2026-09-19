@@ -1,6 +1,7 @@
 import 'package:mebius/src/mebius_client.dart';
 import 'package:mebius/src/mebius_delivery.dart';
 import 'package:mebius/src/mebius_error.dart';
+import 'package:mebius/src/mebius_events.dart';
 
 /// The entry point to the Mebius SDK.
 ///
@@ -64,9 +65,23 @@ abstract final class Mebius {
   /// through as-is: Mebius orders it and picks from it. Optional — without it
   /// playback still works, but every viewer is served from Mebius origin rather
   /// than the nearest edge, which on mobile is billed per viewer.
+  ///
+  /// [getToken] makes the session outlive one token. Give it a function that
+  /// mints a fresh token from your backend and Mebius calls it shortly BEFORE
+  /// `exp`, swapping the credential in place — no reconnect, no renegotiation,
+  /// no visible gap. A failing provider is retried with backoff for as long as
+  /// the current token is still valid, so `TOKEN_EXPIRED` is reported only when
+  /// the credential has genuinely run out. Each successful renewal emits
+  /// [MebiusClientEventType.tokenRefreshed].
+  ///
+  /// Without [getToken] nothing changes: no renewal is scheduled and an expired
+  /// token surfaces exactly when and how it always did. That matters most to a
+  /// camera publisher — a match longer than the token's life is the difference
+  /// between a seamless broadcast and a visible reconnect.
   static MebiusClient connect({
     required String token,
     List<MebiusDelivery> deliveries = const <MebiusDelivery>[],
+    Future<String> Function()? getToken,
   }) {
     if (!isInitialized) {
       throw const MebiusError(
@@ -84,6 +99,7 @@ abstract final class Mebius {
       gateway: _gateway!,
       token: token,
       deliveries: deliveries,
+      getToken: getToken,
     );
   }
 

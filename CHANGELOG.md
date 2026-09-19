@@ -1,3 +1,35 @@
+## 0.3.0
+
+- A session can now outlive the token it opened with. `MebiusClient.updateToken`
+  replaces the credential in place: publishing and playback are not stopped,
+  there is no renegotiation and no track is rebuilt. It throws for an empty
+  token, or for one scoped to a different stream — swapping in a credential for
+  another stream would not renew the session, it would break it on the next
+  request, far from the line that caused it.
+- `Mebius.connect` takes an optional `getToken`. Given one, the SDK mints a
+  fresh credential shortly *before* `exp` rather than reacting to
+  `TOKEN_EXPIRED` afterwards, and retries with backoff for as long as the
+  current token is still valid — so `TOKEN_EXPIRED` now means the credential
+  genuinely ran out, not that one mint failed. Each renewal emits
+  `MebiusClientEventType.tokenRefreshed`.
+
+  This is what a camera publisher needed: a match longer than the token's life
+  used to cost a visible reconnect in the middle of it.
+  A renewed token is refused — and retried, not fatal — when it is scoped to a
+  different stream than the session, or when it does not outlive the token it
+  replaces. A provider's late answer is also dropped if `updateToken` replaced
+  the credential while it was being fetched, so the app's own swap always wins,
+  and `disconnect()` during an in-flight renewal leaves no timer behind.
+
+- Behaviour without `getToken` is unchanged. No renewal is scheduled, no new
+  timer is armed, and an expired token still surfaces exactly when and how it
+  did in 0.2.2 — proven by a test rather than asserted.
+
+Known limitation: a segmented playback session already running keeps the URL it
+was started with, because the platform video player is handed a URL once and
+offers no hook to re-stamp its segment requests. Publishing, and every request
+made after the swap, use the new token.
+
 ## 0.2.2
 
 - A viewer no longer gets stuck on a black frame when the real-time route
