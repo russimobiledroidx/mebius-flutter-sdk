@@ -19,6 +19,17 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      # Resolving example/ makes newer Flutter rewrite the ROOT
+      # analysis_options.yaml ("Upgrading analysis_options.yaml to exclude build
+      # and platform directories"), which leaves the tree dirty and fails the
+      # publish dry run below on "1 checked-in file is modified in git". The
+      # excludes it adds only affect analysis of example/, which is not
+      # published, so the repo's own file is the one to keep.
+      - name: Undo Flutter's edit to the checked-in analysis options
+        run: |
+          git --no-pager diff -- analysis_options.yaml
+          git checkout -- analysis_options.yaml
+
       - name: Analyze
         run: flutter analyze
 
