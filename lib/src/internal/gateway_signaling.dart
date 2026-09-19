@@ -50,7 +50,14 @@ class GatewaySignaling {
   final String gateway;
 
   /// Short-lived bearer token minted by the application backend.
-  final String token;
+  ///
+  /// Mutable, and read at the moment each request is built rather than captured
+  /// once. That is what lets a session outlive the credential it opened with:
+  /// the engine checks the token on every media request, so the segmented
+  /// playback route stops the instant the original one expires — however
+  /// healthy the stream is. Replacing it in place renews nothing else: no
+  /// renegotiation, no new tracks, no interruption.
+  String token;
 
   final http.Client _http;
 
