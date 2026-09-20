@@ -1,3 +1,23 @@
+## Unreleased
+
+- Publishing is capped at 3500 kbps by default, matching the studio's OBS encoder,
+  so a broadcast costs the same whichever path it came from. `createBroadcaster`
+  takes `maxBitrateKbps` to change it; 0 lifts it entirely.
+
+  The cap is applied to the sender's encoding parameters, which is the only place
+  it is real. Capture constraints bound the SOURCE — how many pixels arrive per
+  second — while the encoder still chooses how many bits to spend describing them,
+  and high-motion content makes it spend near the top of its range.
+
+  It matters far past the device: nothing transcodes anywhere in the path, so every
+  viewer is delivered at exactly the bitrate published here. One broadcaster's
+  setting is multiplied by the size of its audience.
+
+- Camera capture now has maximums as well as minimums (1280x720 at 30fps). It had
+  only minimums, which on a capable phone is a licence to send 1080p60 rather than
+  a floor to meet — and this was the one SDK that could drift upward. It now
+  captures what the Android and iOS SDKs capture.
+
 ## 0.3.0
 
 - A delivery route that stops delivering is now reopened instead of leaving a

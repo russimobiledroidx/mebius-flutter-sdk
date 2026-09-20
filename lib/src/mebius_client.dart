@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:clock/clock.dart';
 
+import 'package:mebius/src/internal/broadcast_engine.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/internal/token_info.dart';
 import 'package:mebius/src/mebius_broadcaster.dart';
@@ -134,9 +135,21 @@ class MebiusClient {
   ///
   /// Set [video] and/or [audio] to choose which media is captured. At least
   /// one must be enabled.
+  /// Creates a broadcaster for publishing from this device.
+  ///
+  /// [maxBitrateKbps] caps what the video encoder may send. It defaults to the
+  /// ceiling every Mebius SDK uses, which matches the studio's OBS encoder — so a
+  /// broadcast costs the same whichever path it came from. Pass 0 or null to lift
+  /// the cap and let WebRTC decide.
+  ///
+  /// Worth understanding before changing: nothing transcodes downstream, so every
+  /// viewer is delivered at exactly the bitrate published here. One broadcaster's
+  /// setting is multiplied by the size of its audience — a number that looks
+  /// generous for one host is a bandwidth bill for a thousand viewers.
   MebiusBroadcaster createBroadcaster({
     bool video = true,
     bool audio = true,
+    int? maxBitrateKbps = kDefaultMaxBitrateKbps,
   }) {
     _ensureConnected();
     if (!video && !audio) {
@@ -146,6 +159,7 @@ class MebiusClient {
       );
     }
     final broadcaster = MebiusBroadcaster.internal(
+      maxBitrateKbps: maxBitrateKbps,
       signaling: _signaling,
       video: video,
       audio: audio,
