@@ -12,7 +12,7 @@ import 'package:mebius/src/mebius_error.dart';
 
 /// Ceiling on what a publisher's video encoder may send, in kbps.
 ///
-/// 3500 matches what the studio's OBS encoder is configured to send, so a
+/// 2500 matches what the studio's OBS encoder is configured to send, so a
 /// broadcast costs the same whichever path it came from — a host on a phone and a
 /// host in the studio bill identically.
 ///
@@ -22,7 +22,7 @@ import 'package:mebius/src/mebius_error.dart';
 ///
 /// Every Mebius SDK carries this same number. Changing it in one place without the
 /// others makes the cost of a broadcast depend on which phone made it.
-const int kDefaultMaxBitrateKbps = 3500;
+const int kDefaultMaxBitrateKbps = 2500;
 
 /// Drives camera/mic capture and the WHIP publish session.
 class BroadcastEngine {

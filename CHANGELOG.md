@@ -1,6 +1,6 @@
 ## Unreleased
 
-- Publishing is capped at 3500 kbps by default, matching the studio's OBS encoder,
+- Publishing is capped at 2500 kbps by default, matching the studio's OBS encoder,
   so a broadcast costs the same whichever path it came from. `createBroadcaster`
   takes `maxBitrateKbps` to change it; 0 lifts it entirely.
 
