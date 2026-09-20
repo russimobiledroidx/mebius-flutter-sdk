@@ -10,17 +10,36 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/mebius_error.dart';
 
+/// Ceiling on what a publisher's video encoder may send, in kbps.
+///
+/// 2500 matches what the studio's OBS encoder is configured to send, so a
+/// broadcast costs the same whichever path it came from — a host on a phone and a
+/// host in the studio bill identically.
+///
+/// It is a ceiling, not a target: WebRTC still spends less on still scenes. What
+/// it removes is the open end, where a capable device answered high-motion content
+/// with whatever it could encode.
+///
+/// Every Mebius SDK carries this same number. Changing it in one place without the
+/// others makes the cost of a broadcast depend on which phone made it.
+const int kDefaultMaxBitrateKbps = 2500;
+
 /// Drives camera/mic capture and the WHIP publish session.
 class BroadcastEngine {
   BroadcastEngine({
     required this.signaling,
     required this.video,
     required this.audio,
+    this.maxBitrateKbps = kDefaultMaxBitrateKbps,
   });
 
   final GatewaySignaling signaling;
   final bool video;
   final bool audio;
+
+  /// Ceiling on what the encoder may send, in kbps. Zero or null lifts it and
+  /// leaves the choice to WebRTC.
+  final int? maxBitrateKbps;
 
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
@@ -43,10 +62,19 @@ class BroadcastEngine {
         'video': video
             ? {
                 'facingMode': 'user',
+                // Minimums AND maximums. With only the minimums these were, a
+                // capable phone was free to hand back 1080p60 — which is a
+                // licence to spend, not a floor to meet, and it is delivery
+                // bandwidth that pays for it. 720p30 matches what the Android
+                // and iOS SDKs capture, so the same broadcast costs the same
+                // whichever device it came from.
                 'mandatory': {
                   'minWidth': '640',
                   'minHeight': '360',
                   'minFrameRate': '24',
+                  'maxWidth': '1280',
+                  'maxHeight': '720',
+                  'maxFrameRate': '30',
                 },
               }
             : false,
@@ -70,6 +98,7 @@ class BroadcastEngine {
     }
 
     await preferH264(pc);
+    await _applyBitrateCap(pc);
 
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -79,6 +108,50 @@ class BroadcastEngine {
     await pc.setRemoteDescription(
       RTCSessionDescription(result.answerSdp, 'answer'),
     );
+  }
+
+  /// Caps what the video encoder may send.
+  ///
+  /// Capture constraints alone do not do this. They bound the SOURCE — how many
+  /// pixels arrive per second — while the encoder still chooses how many bits to
+  /// spend describing them, and high-motion content (sport, above all) makes it
+  /// spend near the top of its range. The only place the ceiling is real is the
+  /// sender's own encoding parameters.
+  ///
+  /// Why it matters beyond the device: there is no transcoding anywhere in the
+  /// path, so every viewer is delivered at exactly the bitrate published here.
+  /// One publisher's setting is multiplied by the size of its audience.
+  ///
+  /// Best-effort by design. A platform that does not implement setParameters
+  /// leaves the stream uncapped rather than failing to go live — an unbudgeted
+  /// broadcast beats no broadcast, and the caller learns from the stats either
+  /// way.
+  Future<void> _applyBitrateCap(RTCPeerConnection pc) async {
+    final kbps = maxBitrateKbps;
+    if (kbps == null || kbps <= 0) {
+      return;
+    }
+    try {
+      final senders = await pc.getSenders();
+      for (final sender in senders) {
+        if (sender.track?.kind != 'video') {
+          continue;
+        }
+        final params = sender.parameters;
+        final encodings = params.encodings;
+        if (encodings == null || encodings.isEmpty) {
+          params.encodings = [RTCRtpEncoding(maxBitrate: kbps * 1000)];
+        } else {
+          for (final e in encodings) {
+            e.maxBitrate = kbps * 1000;
+          }
+        }
+        await sender.setParameters(params);
+      }
+    } on Object catch (_) {
+      // See the note above: an uncapped publish is worse than a capped one, and
+      // better than a failed one.
+    }
   }
 
   /// Stops publishing and releases capture resources.

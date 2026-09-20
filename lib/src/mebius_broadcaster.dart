@@ -25,10 +25,12 @@ class MebiusBroadcaster {
     required GatewaySignaling signaling,
     required bool video,
     required bool audio,
+    int? maxBitrateKbps = kDefaultMaxBitrateKbps,
   }) : _engine = BroadcastEngine(
           signaling: signaling,
           video: video,
           audio: audio,
+          maxBitrateKbps: maxBitrateKbps,
         );
 
   final BroadcastEngine _engine;
