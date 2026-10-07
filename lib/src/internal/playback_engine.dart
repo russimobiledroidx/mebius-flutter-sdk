@@ -10,6 +10,7 @@
 // Internal implementation detail; not part of the documented public surface.
 // ignore_for_file: public_member_api_docs
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/mebius_delivery.dart';
@@ -39,11 +40,29 @@ const Duration kFirstFrameTimeout = Duration(seconds: 8);
 /// [path] is null for the WebRTC route, which is signaled rather than fetched
 /// and therefore never appears in the gateway's delivery list.
 class PlaybackCandidate {
-  const PlaybackCandidate(this.pipeline, [this.path]);
+  const PlaybackCandidate(this.pipeline, [this.path]) : flv = false;
+
+  /// The `fast` route at [path], played as HTTP-FLV.
+  const PlaybackCandidate.flv(this.path)
+      : pipeline = PlaybackPipeline.scale,
+        flv = true;
 
   final PlaybackPipeline pipeline;
   final String? path;
+
+  /// The buffered `fast` route: HTTP-FLV, one long-lived response rather than
+  /// a playlist. Played as a progressive stream, never with an HLS hint.
+  final bool flv;
 }
+
+/// Whether this platform's video player can play the buffered `fast` route.
+///
+/// Android's player (ExoPlayer/media3) ships an FLV extractor and plays a
+/// live HTTP-FLV response as a progressive stream — the same route the web
+/// SDK plays through flv.js, a few seconds behind live instead of the ten-plus
+/// of CDN HLS. iOS has no FLV support at all (AVPlayer), so it keeps `wide`.
+bool get platformPlaysFlv =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
 /// Builds the ordered route list for a playback mode.
 ///
@@ -52,13 +71,14 @@ class PlaybackCandidate {
 /// appended last, both as a guaranteed fallback and because every byte of it is
 /// billed to us, unlike an edge route.
 ///
-/// Flutter deliberately does NOT declare the buffered mid-latency route: the
-/// platform video player has no support for it, so offering it would be a route
+/// The buffered `fast` route (HTTP-FLV) is included only when [flv] is set —
+/// see [platformPlaysFlv]: on a player without an FLV demuxer it is a route
 /// that could never play.
 List<PlaybackCandidate> buildCandidates(
   PlaybackPipeline preferred,
-  List<MebiusDelivery> deliveries,
-) {
+  List<MebiusDelivery> deliveries, {
+  bool flv = false,
+}) {
   final out = <PlaybackCandidate>[];
   if (preferred == PlaybackPipeline.lowLatency) {
     out.add(const PlaybackCandidate(PlaybackPipeline.lowLatency));
@@ -67,8 +87,12 @@ List<PlaybackCandidate> buildCandidates(
     if (!d.isResolvable) {
       continue;
     }
-    // "fast" is skipped: it is the buffered route this platform cannot play.
-    if (d.kind == 'wide' || d.kind == 'local') {
+    // "fast" (HTTP-FLV) only where the platform player can demux FLV; the
+    // gateway lists it first, so it is tried first and `wide` stays the
+    // fallback. Elsewhere it is a route that could never play.
+    if (d.kind == 'fast' && flv) {
+      out.add(PlaybackCandidate.flv(d.path));
+    } else if (d.kind == 'wide' || d.kind == 'local') {
       out.add(PlaybackCandidate(PlaybackPipeline.scale, d.path));
     }
   }
@@ -161,13 +185,14 @@ class PlaybackEngine {
       return;
     }
     Object? lastError;
-    for (final candidate in buildCandidates(pipeline, deliveries)) {
+    for (final candidate
+        in buildCandidates(pipeline, deliveries, flv: platformPlaysFlv)) {
       try {
         switch (candidate.pipeline) {
           case PlaybackPipeline.lowLatency:
             await _startLowLatency(streamId);
           case PlaybackPipeline.scale:
-            await _startScale(streamId, candidate.path);
+            await _startScale(streamId, candidate.path, flv: candidate.flv);
         }
         if (await _awaitFirstFrame()) {
           return;
@@ -270,7 +295,11 @@ class PlaybackEngine {
     );
   }
 
-  Future<void> _startScale(String streamId, [String? deliveryPath]) async {
+  Future<void> _startScale(
+    String streamId,
+    String? deliveryPath, {
+    bool flv = false,
+  }) async {
     final url = deliveryPath == null
         ? signaling.scalePlaylistUrl(streamId)
         : signaling.deliveryUrl(deliveryPath);
@@ -278,9 +307,11 @@ class PlaybackEngine {
     // Delivery paths (`/d/wide/{id}`) carry no `.m3u8` extension, and Android's
     // player guesses the container from the URL: without the hint it opens the
     // playlist as a progressive file and fails with UnrecognizedInputFormat.
+    // FLV is exactly that progressive case, so it gets no hint and the player
+    // sniffs the container.
     final controller = VideoPlayerController.networkUrl(
       Uri.parse(url),
-      formatHint: VideoFormat.hls,
+      formatHint: flv ? null : VideoFormat.hls,
     );
     _videoController = controller;
     try {

@@ -1,5 +1,14 @@
-## 0.4.1
+## 0.5.0
 
+- Android plays the buffered `fast` route (HTTP-FLV), the route the web SDK
+  plays through flv.js: a few seconds behind live instead of the ten-plus of
+  CDN HLS. The gateway lists it first, so it is tried first; `wide`, `local`
+  and the origin playlist stay the fallbacks, in that order. Android's player
+  (media3) demuxes FLV natively and plays the live response as a progressive
+  stream. iOS keeps `wide`: AVPlayer has no FLV support.
+- The route probe reads only the status line. It downloaded the whole body,
+  which on a live FLV route never ends; it now closes the connection after
+  the headers, for every route.
 - Android viewers get a picture on the CDN route. Delivery paths such as
   `/d/wide/{id}` have no `.m3u8` extension, and the Android player picks the
   container from the URL, so it opened the HLS playlist as a progressive file
