@@ -99,6 +99,19 @@ void main() {
       expect(c.map((x) => x.flv), [true, false, false, false]);
     });
 
+    test('stall progress: playhead on HLS, buffered end on FLV', () {
+      // media3 reports a live FLV playhead as a constant 1 ms while the picture
+      // moves; reading it made every FLV session look frozen.
+      expect(
+        scaleProgress(flv: true, position: const Duration(milliseconds: 1), bufferedEnd: const Duration(seconds: 12)),
+        12000,
+      );
+      expect(
+        scaleProgress(flv: false, position: const Duration(seconds: 3), bufferedEnd: const Duration(seconds: 9)),
+        3000,
+      );
+    });
+
     test('FLV is an Android-only capability', () {
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       expect(platformPlaysFlv, isTrue);
