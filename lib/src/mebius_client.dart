@@ -37,11 +37,16 @@ class MebiusClient {
         _getToken = getToken,
         _signaling = GatewaySignaling(gateway: gateway, token: token) {
     // Connection to the gateway is established lazily on first publish/play,
-    // but we surface a `connected` event immediately so applications can wire
-    // up their UI deterministically.
+    // so the client is usable as soon as it exists — as on Android, where
+    // `connect` returns a connected client. Marking it connected on a microtask
+    // made the documented `connect(...).createPlayer()` throw NOT_CONNECTED.
+    // Only the event waits a microtask, so a listener attached right after
+    // `connect` still hears it.
+    _connected = true;
     scheduleMicrotask(() {
-      _connected = true;
-      _emit(const MebiusClientEvent(MebiusClientEventType.connected));
+      if (!_disposed) {
+        _emit(const MebiusClientEvent(MebiusClientEventType.connected));
+      }
     });
     _scheduleRefresh(readToken(token).expiresAt);
   }

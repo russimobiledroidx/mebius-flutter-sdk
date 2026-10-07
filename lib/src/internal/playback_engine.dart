@@ -275,7 +275,13 @@ class PlaybackEngine {
         ? signaling.scalePlaylistUrl(streamId)
         : signaling.deliveryUrl(deliveryPath);
     await signaling.ensureScaleReachable(streamId, url);
-    final controller = VideoPlayerController.networkUrl(Uri.parse(url));
+    // Delivery paths (`/d/wide/{id}`) carry no `.m3u8` extension, and Android's
+    // player guesses the container from the URL: without the hint it opens the
+    // playlist as a progressive file and fails with UnrecognizedInputFormat.
+    final controller = VideoPlayerController.networkUrl(
+      Uri.parse(url),
+      formatHint: VideoFormat.hls,
+    );
     _videoController = controller;
     try {
       await controller.initialize();

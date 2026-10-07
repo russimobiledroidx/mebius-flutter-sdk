@@ -1,3 +1,18 @@
+## 0.4.1
+
+- Android viewers get a picture on the CDN route. Delivery paths such as
+  `/d/wide/{id}` have no `.m3u8` extension, and the Android player picks the
+  container from the URL, so it opened the HLS playlist as a progressive file
+  and failed with `UnrecognizedInputFormatException` on every route. The
+  player is now told the stream is HLS. iOS was unaffected (AVPlayer reads the
+  response's content type).
+- `Mebius.connect(...).createPlayer()` no longer throws `NOT_CONNECTED`. The
+  client was marked connected on a microtask, so creating a player in the same
+  synchronous block as `connect` — the README's own example — failed. The client
+  is connected when `connect` returns, as on Android; the `connected` event is
+  still delivered on a microtask so a listener attached right after `connect`
+  hears it.
+
 ## 0.4.0
 
 - Publishing is capped at 2500 kbps by default, matching the studio's OBS encoder,

@@ -132,9 +132,9 @@ void main() {
 
     test('accepts deliveries and still connects without them', () async {
       final withList = Mebius.connect(token: 'tok', deliveries: _deliveries);
-      expect(withList.isConnected, isFalse); // connects on a microtask
-      await Future<void>.delayed(Duration.zero);
       expect(withList.isConnected, isTrue);
+      // The documented one-liner: a player straight off connect, no await.
+      expect(withList.createPlayer, returnsNormally);
       await withList.disconnect();
 
       final without = Mebius.connect(token: 'tok');
