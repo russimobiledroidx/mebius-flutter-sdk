@@ -21,6 +21,8 @@
 // Internal implementation detail; not part of the documented public surface.
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:http/http.dart' as http;
 import 'package:mebius/src/mebius_error.dart';
 
@@ -154,12 +156,12 @@ class GatewaySignaling {
 
   /// Verifies that the configured stream playlist is reachable for scale mode.
   Future<void> ensureScaleReachable(String streamId, [String? url]) async {
-    http.Response response;
+    http.StreamedResponse response;
     try {
-      response = await _http.get(
-        Uri.parse(url ?? scalePlaylistUrl(streamId)),
-        headers: _authHeaders,
-      );
+      final request =
+          http.Request('GET', Uri.parse(url ?? scalePlaylistUrl(streamId)))
+            ..headers.addAll(_authHeaders);
+      response = await _http.send(request);
     } catch (e) {
       throw MebiusError(
         MebiusErrorCode.connectionFailed,
@@ -167,6 +169,10 @@ class GatewaySignaling {
         cause: e,
       );
     }
+    // Only the status line matters. A live FLV route never ends its body, so
+    // reading it (as a plain GET does) would hang the probe forever; cancelling
+    // the body closes the connection after the headers.
+    unawaited(response.stream.listen(null, onError: (_) {}).cancel());
     _throwForStatus(response.statusCode);
   }
 

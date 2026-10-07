@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mebius/mebius.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
@@ -78,11 +79,32 @@ void main() {
       expect(c.last.path, isNull);
     });
 
-    test('never offers the buffered route on this platform', () {
-      // The platform player cannot play it. Declaring it would repeat the exact
+    test('never offers the buffered route to a player without FLV', () {
+      // iOS (AVPlayer) cannot play it. Declaring it would repeat the exact
       // mistake of shipping a mode that can never play.
       final c = buildCandidates(PlaybackPipeline.scale, _deliveries);
       expect(c.map((x) => x.path), isNot(contains('/d/fast/s_abc')));
+      expect(c.any((x) => x.flv), isFalse);
+    });
+
+    test('a player with FLV tries the buffered route first, HLS after', () {
+      // Android: same order as the web SDK — fast, then wide, local, origin.
+      final c = buildCandidates(PlaybackPipeline.scale, _deliveries, flv: true);
+      expect(c.map((x) => x.path), [
+        '/d/fast/s_abc',
+        '/d/wide/s_abc',
+        '/live/s_abc/index.m3u8',
+        null,
+      ]);
+      expect(c.map((x) => x.flv), [true, false, false, false]);
+    });
+
+    test('FLV is an Android-only capability', () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      expect(platformPlaysFlv, isTrue);
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      expect(platformPlaysFlv, isFalse);
+      debugDefaultTargetPlatformOverride = null;
     });
 
     test('tries the real-time route first for low latency, then degrades', () {
@@ -132,9 +154,9 @@ void main() {
 
     test('accepts deliveries and still connects without them', () async {
       final withList = Mebius.connect(token: 'tok', deliveries: _deliveries);
-      expect(withList.isConnected, isFalse); // connects on a microtask
-      await Future<void>.delayed(Duration.zero);
       expect(withList.isConnected, isTrue);
+      // The documented one-liner: a player straight off connect, no await.
+      expect(withList.createPlayer, returnsNormally);
       await withList.disconnect();
 
       final without = Mebius.connect(token: 'tok');
