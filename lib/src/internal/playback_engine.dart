@@ -61,6 +61,22 @@ class PlaybackCandidate {
 /// live HTTP-FLV response as a progressive stream — the same route the web
 /// SDK plays through flv.js, a few seconds behind live instead of the ten-plus
 /// of CDN HLS. iOS has no FLV support at all (AVPlayer), so it keeps `wide`.
+/// How far a scale route has got, for the stall detector.
+///
+/// The playhead, except on HTTP-FLV: Android's player reports a live
+/// progressive stream's position as a constant (1 ms on media3 1.9) while the
+/// picture moves, so a playhead-based detector declared every FLV session
+/// stalled ten seconds in and reopened it — a "reconnecting" loop every ~14 s
+/// on a healthy stream. What moves on a live FLV route is the buffered end:
+/// media keeps arriving for as long as the route is alive, and stops when it
+/// dies, which is exactly the failure the detector exists to catch.
+int scaleProgress({
+  required bool flv,
+  required Duration position,
+  required Duration bufferedEnd,
+}) =>
+    (flv ? bufferedEnd : position).inMilliseconds;
+
 bool get platformPlaysFlv =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
@@ -163,6 +179,9 @@ class PlaybackEngine {
 
   // Scale (HLS) state.
   VideoPlayerController? _videoController;
+
+  /// The serving scale route is the buffered `fast` route (HTTP-FLV).
+  bool _flv = false;
 
   double _volume = 1;
 
@@ -314,6 +333,7 @@ class PlaybackEngine {
       formatHint: flv ? null : VideoFormat.hls,
     );
     _videoController = controller;
+    _flv = flv;
     try {
       await controller.initialize();
     } catch (e) {
@@ -412,7 +432,13 @@ class PlaybackEngine {
         'bitrate': 0,
         'fps': 0,
         'buffered': buffered,
-        'progress': controller.value.position.inMilliseconds,
+        'progress': scaleProgress(
+          flv: _flv,
+          position: controller.value.position,
+          bufferedEnd: controller.value.buffered.isEmpty
+              ? Duration.zero
+              : controller.value.buffered.last.end,
+        ),
       };
     }
     return const {};

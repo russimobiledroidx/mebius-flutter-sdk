@@ -1,3 +1,13 @@
+## 0.5.1
+
+- Android no longer reopens a healthy `fast` (HTTP-FLV) route every ~14 s.
+  media3 reports a live progressive stream's playhead as a constant (1 ms)
+  while the picture moves, so the stall detector — which watched the playhead
+  — declared every FLV session frozen ten seconds in and reopened it, and the
+  viewer saw "reconnecting" on a fast connection. On FLV the detector now
+  watches the buffered end, which moves while media arrives and stops when the
+  route dies. HLS still uses the playhead.
+
 ## 0.5.0
 
 - Android plays the buffered `fast` route (HTTP-FLV), the route the web SDK
