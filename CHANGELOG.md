@@ -1,6 +1,7 @@
 ## 0.6.0
 
-- Quality selection for streams with a rendition ladder (1080p/720p/480p).
+- Quality selection for streams with a rendition ladder (1080p/720p/540p/480p
+  at 60 fps, video 6000/3000/2000/1300 kbps).
   `MebiusPlayer.qualities`, `setQuality("auto" | id)`, `setMaxQuality(height)`,
   `setAllowedQualities(ids)`, and the `qualitiesChanged` / `qualityChanged`
   (`MebiusQualityChange`) streams — the same names as the web, Android and iOS
@@ -17,8 +18,11 @@
   back to auto, reported as `auto: true`.
 - Choices made while a route is still opening are applied once it lands
   (latest wins) instead of opening a second route beside it, and
-  `qualityChanged` reports what was actually opened.
-- `qualities` is empty and `setQuality` a no-op in `lowLatency` mode.
+  `qualityChanged` reports what was actually opened. An open still in flight
+  when `stop()` runs is retired: it disposes what it made and can no longer
+  replace the session that follows.
+- `qualities` is empty and `setQuality` a no-op in `lowLatency` mode, whose
+  fallback routes keep the 0.5.1 order and URLs.
 - Streams without `renditions` behave exactly as in 0.5.1: `qualities` is
   empty and route selection is unchanged.
 

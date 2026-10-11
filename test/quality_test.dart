@@ -8,9 +8,10 @@ import 'package:mebius/src/internal/playback_engine.dart';
 
 List<Map<String, Object>> _rungs(String base) => [
       for (final (id, h, kbps) in [
-        ('1080p', 1080, 5000),
-        ('720p', 720, 2800),
-        ('480p', 480, 1000),
+        ('1080p', 1080, 6000),
+        ('720p', 720, 3000),
+        ('540p', 540, 2000),
+        ('480p', 480, 1300),
       ])
         {'id': id, 'height': h, 'bitrateKbps': kbps, 'path': '$base/$id'},
     ];
@@ -32,8 +33,18 @@ final List<MebiusDelivery> _plain = MebiusDelivery.listFromJson([
 List<String?> _paths(List<PlaybackCandidate> c) =>
     c.map((x) => x.path).toList();
 
+/// What one fake open made: stands in for the platform player controller.
+class _FakeController {
+  _FakeController(this.streamId, this.path);
+  final String streamId;
+  final String? path;
+  bool disposed = false;
+}
+
 /// Plays nothing: records each route the engine opens and lets a test decide
-/// when (via [hold]) and whether (via [failing]) it produces a frame.
+/// when (via [hold]) and whether (via [failing]) it produces a frame. Mirrors
+/// the real engine's contract: publishes only while its generation is current,
+/// and disposes what it made otherwise.
 class _FakeEngine extends PlaybackEngine {
   _FakeEngine(List<MebiusDelivery> d)
       : super(
@@ -44,27 +55,37 @@ class _FakeEngine extends PlaybackEngine {
   }
 
   final Set<String?> failing = <String?>{};
+  final List<_FakeController> controllers = <_FakeController>[];
   Completer<void>? hold;
   int inFlight = 0;
   int maxInFlight = 0;
-  String? playing;
+  _FakeController? current;
+
+  String? get playing => current?.path;
 
   @override
-  bool get isPlaying => playing != null;
+  bool get isPlaying => current != null;
 
   @override
-  Future<bool> openCandidate(String streamId, PlaybackCandidate c) async {
+  Future<bool> openCandidate(
+    String streamId,
+    PlaybackCandidate c,
+    int gen,
+  ) async {
     inFlight += 1;
     maxInFlight = math.max(maxInFlight, inFlight);
+    final ctl = _FakeController(streamId, c.path);
+    controllers.add(ctl);
     try {
       final h = hold;
       if (h != null) {
         await h.future;
       }
-      if (failing.contains(c.path)) {
+      if (generation != gen || failing.contains(c.path)) {
+        ctl.disposed = true;
         return false;
       }
-      playing = c.path;
+      current = ctl;
       return true;
     } finally {
       inFlight -= 1;
@@ -73,7 +94,9 @@ class _FakeEngine extends PlaybackEngine {
 
   @override
   Future<void> stop() async {
-    playing = null;
+    await super.stop(); // retires opens in flight
+    current?.disposed = true;
+    current = null;
   }
 }
 
@@ -157,7 +180,8 @@ void main() {
     test('pickRendition: highest under the cap, else lowest', () {
       expect(pickRendition(rungs, null)?.id, '1080p');
       expect(pickRendition(rungs, 720)?.id, '720p');
-      expect(pickRendition(rungs, 600)?.id, '480p');
+      expect(pickRendition(rungs, 600)?.id, '540p');
+      expect(pickRendition(rungs, 500)?.id, '480p');
       expect(pickRendition(rungs, 240)?.id, '480p');
       expect(pickRendition(const [], 480), isNull);
     });
@@ -259,6 +283,29 @@ void main() {
       expect(_paths(c).take(2), ['/d/fast/s1/480p', '/d/wide/s1/480p']);
     });
 
+    test('low latency ignores the ladder: 0.5.1 order and URLs', () {
+      final tuned = buildCandidates(
+        PlaybackPipeline.lowLatency,
+        _laddered,
+        flv: true,
+        quality: '720p',
+        maxHeight: 480,
+        allowed: const ['720p'],
+      );
+      final plain =
+          buildCandidates(PlaybackPipeline.lowLatency, _plain, flv: true);
+      expect(_paths(tuned), _paths(plain));
+      expect(_paths(tuned), [
+        null, // WebRTC
+        '/d/fast/s1',
+        '/d/wide/s1',
+        '/live/s1/index.m3u8',
+        null, // origin
+      ]);
+      expect(tuned.map((x) => x.pipeline), plain.map((x) => x.pipeline));
+      expect(tuned.map((x) => x.flv), plain.map((x) => x.flv));
+    });
+
     test('no ladder: quality settings change nothing', () {
       for (final flv in [true, false]) {
         final base = buildCandidates(PlaybackPipeline.scale, _plain, flv: flv);
@@ -304,7 +351,10 @@ void main() {
 
     test('play reports auto; setQuality reopens on the rung', () async {
       final t = _player();
-      expect(t.player.qualities.map((q) => q.id), ['1080p', '720p', '480p']);
+      expect(
+        t.player.qualities.map((q) => q.id),
+        ['1080p', '720p', '540p', '480p'],
+      );
       await t.player.play('s1');
       expect(t.engine.playing, '/d/wide/s1');
       await t.player.setQuality('720p');
@@ -378,22 +428,48 @@ void main() {
       await t.player.dispose();
     });
 
-    test('L3: a stale reopen does not stop a newer session', () async {
-      final t = _player();
-      await t.player.play('s1');
-      final staleOpen = t.engine.hold = Completer<void>();
-      final stale = t.player.setQuality('720p');
-      await Future<void>.delayed(Duration.zero); // 720p open is in flight
-      await t.player.stop();
-      final replayOpen = t.engine.hold = Completer<void>();
-      final replay = t.player.play('s1');
-      replayOpen.complete();
-      await replay;
-      staleOpen.complete(); // the stale reopen lands after the replay
-      await stale;
-      expect(t.engine.isPlaying, isTrue);
-      await t.player.dispose();
-    });
+    for (final staleLandsLast in [true, false]) {
+      test(
+          'a stale reopen cannot replace a newer session '
+          '(stale lands ${staleLandsLast ? 'after' : 'before'} the replay)',
+          () async {
+        final t = _player();
+        await t.player.play('A');
+        final aOpen = t.engine.hold = Completer<void>();
+        final stale = t.player.setQuality('720p');
+        await Future<void>.delayed(Duration.zero); // A's 720p open in flight
+        await t.player.stop();
+        final bOpen = t.engine.hold = Completer<void>();
+        final replay = t.player.play('B');
+        await Future<void>.delayed(Duration.zero); // B's open in flight
+        if (staleLandsLast) {
+          bOpen.complete();
+          await replay;
+          aOpen.complete();
+          await stale;
+        } else {
+          aOpen.complete();
+          await stale;
+          // B's play is still opening, so a pick now must wait for it, not
+          // open beside it: the stale reopen may not clear B's in-flight flag.
+          await t.player.setQuality('480p');
+          expect(t.engine.controllers.where((c) => c.streamId == 'B'), hasLength(1));
+          bOpen.complete();
+          await replay;
+        }
+        expect(t.engine.current?.streamId, 'B');
+        expect(t.engine.current?.disposed, isFalse);
+        final a720 = t.engine.controllers.singleWhere(
+          (c) => c.streamId == 'A' && c.path == '/d/fast/s1/720p',
+        );
+        expect(a720.disposed, isTrue);
+        // The stale reopen left B's player usable: a pick still reopens it.
+        await t.player.setQuality('480p');
+        expect(t.engine.current?.streamId, 'B');
+        expect(t.engine.playing, '/d/fast/s1/480p');
+        await t.player.dispose();
+      });
+    }
 
     test('setAllowedQualities filters qualities and steers auto', () async {
       final t = _player();
@@ -414,11 +490,11 @@ void main() {
       );
       await t.player.setAllowedQualities(['720p', '1080p']); // same set
       await t.player.setAllowedQualities(['4k']); // names none: all allowed
-      expect(t.player.qualities, hasLength(3));
+      expect(t.player.qualities, hasLength(4));
       expect(lists, [
-        ['1080p', '720p', '480p'],
+        ['1080p', '720p', '540p', '480p'],
         ['1080p', '720p'],
-        ['1080p', '720p', '480p'],
+        ['1080p', '720p', '540p', '480p'],
       ]);
       // Survives a replay.
       await t.player.setAllowedQualities(['720p', '480p']);

@@ -98,7 +98,7 @@ bool get platformPlaysFlv =>
 ///
 /// [quality] (a rendition id, null for auto), [maxHeight] and [allowed]
 /// choose which rung of a laddered route is opened. Routes without
-/// renditions are untouched by all three.
+/// renditions are untouched by all three, and so is low latency.
 List<PlaybackCandidate> buildCandidates(
   PlaybackPipeline preferred,
   List<MebiusDelivery> deliveries, {
@@ -107,10 +107,19 @@ List<PlaybackCandidate> buildCandidates(
   int? maxHeight,
   List<String>? allowed,
 }) {
-  final out = <PlaybackCandidate>[];
   if (preferred == PlaybackPipeline.lowLatency) {
-    out.add(const PlaybackCandidate(PlaybackPipeline.lowLatency));
+    // A real-time session has one quality. Its fallbacks ignore the ladder
+    // entirely, so their order and URLs stay exactly as they were in 0.5.1.
+    return [
+      const PlaybackCandidate(PlaybackPipeline.lowLatency),
+      ...buildCandidates(
+        PlaybackPipeline.scale,
+        [for (final d in deliveries) MebiusDelivery(kind: d.kind, path: d.path)],
+        flv: flv,
+      ),
+    ];
   }
+  final out = <PlaybackCandidate>[];
   final usable = deliveries.where((d) => d.isResolvable);
   if (quality != null) {
     // A pinned rung opens only as that rung. When no route has it (or none of
@@ -318,6 +327,20 @@ class PlaybackEngine {
 
   double _volume = 1;
 
+  /// Bumped by [stop]. An open captures it when it begins and publishes into
+  /// the fields above only while it is unchanged, so an open that outlives a
+  /// [stop] — a quality reopen still in flight when the viewer switched
+  /// streams — releases what it made instead of replacing the newer session.
+  int _gen = 0;
+
+  @visibleForTesting
+  int get generation => _gen;
+
+  static const MebiusError _stopped = MebiusError(
+    MebiusErrorCode.connectionFailed,
+    'Playback was stopped before the stream opened.',
+  );
+
   bool get isPlaying => _pc != null || _videoController != null;
 
   /// Remote media stream for low-latency mode (null in scale mode).
@@ -336,12 +359,16 @@ class PlaybackEngine {
     if (isPlaying) {
       return;
     }
+    final gen = _gen;
     final pinned = quality;
     if (pinned != null) {
       try {
-        await _walk(streamId, pinned);
+        await _walk(streamId, pinned, gen);
         return;
       } on Object catch (_) {
+        if (gen != _gen) {
+          rethrow;
+        }
         // A pinned rung that will not open — the vendor may skip a rung larger
         // than the source — falls back to auto rather than failing. Unless the
         // viewer already picked something else meanwhile.
@@ -350,10 +377,10 @@ class PlaybackEngine {
         }
       }
     }
-    await _walk(streamId, null);
+    await _walk(streamId, null, gen);
   }
 
-  Future<void> _walk(String streamId, String? pinned) async {
+  Future<void> _walk(String streamId, String? pinned, int gen) async {
     final cap = maxHeight;
     final allow = allowed;
     Object? lastError;
@@ -365,8 +392,17 @@ class PlaybackEngine {
       maxHeight: cap,
       allowed: allow,
     )) {
+      // Stopped mid-walk: whatever runs now belongs to a newer session.
+      if (gen != _gen) {
+        throw _stopped;
+      }
       try {
-        if (await openCandidate(streamId, candidate)) {
+        final ok = await openCandidate(streamId, candidate, gen);
+        if (gen != _gen) {
+          // stop() already released what this open published.
+          throw _stopped;
+        }
+        if (ok) {
           openedQualityId = candidate.qualityId;
           openedAuto = pinned == null;
           _openedKey = _selectionKey(pinned, cap, allow);
@@ -377,11 +413,14 @@ class PlaybackEngine {
           'A Mebius route delivered no video.',
         );
       } on Object catch (e) {
+        if (gen != _gen) {
+          throw _stopped;
+        }
         lastError = e;
       }
       // Release the dead route before opening the next one; leaving a peer
       // connection or a platform player attached leaks it for the whole session.
-      await stop();
+      await _release();
     }
     throw MebiusError.from(
       lastError ??
@@ -394,26 +433,34 @@ class PlaybackEngine {
 
   /// Opens one route and resolves whether it produced a first frame. The seam
   /// tests replace to drive route outcomes without a platform player.
+  ///
+  /// Publishes into the engine's state only while [gen] is current; once it is
+  /// not, disposes what it made itself and stops.
   @visibleForTesting
-  Future<bool> openCandidate(String streamId, PlaybackCandidate candidate) async {
+  Future<bool> openCandidate(
+    String streamId,
+    PlaybackCandidate candidate,
+    int gen,
+  ) async {
     switch (candidate.pipeline) {
       case PlaybackPipeline.lowLatency:
-        await _startLowLatency(streamId);
+        await _startLowLatency(streamId, gen);
       case PlaybackPipeline.scale:
-        await _startScale(streamId, candidate.path, flv: candidate.flv);
+        await _startScale(streamId, candidate.path, gen, flv: candidate.flv);
     }
-    return _awaitFirstFrame();
+    return _awaitFirstFrame(gen);
   }
 
   /// Resolves true once the stream is actually rendering, false on timeout.
   ///
   /// Progress of the picture is the signal, not "initialized" or "connected" —
   /// both of those are true on a route that is sending nothing.
-  Future<bool> _awaitFirstFrame() async {
+  Future<bool> _awaitFirstFrame(int gen) async {
     final deadline = DateTime.now().add(kFirstFrameTimeout);
-    while (DateTime.now().isBefore(deadline)) {
+    // Never reads a newer session's frame as this open's.
+    while (gen == _gen && DateTime.now().isBefore(deadline)) {
       if (await _hasFrame()) {
-        return true;
+        return gen == _gen;
       }
       await Future<void>.delayed(const Duration(milliseconds: 200));
     }
@@ -451,15 +498,21 @@ class PlaybackEngine {
     }
   }
 
-  Future<void> _startLowLatency(String streamId) async {
+  Future<void> _startLowLatency(String streamId, int gen) async {
     final pc = await createPeerConnection({
       'iceServers': <Map<String, dynamic>>[],
       'sdpSemantics': 'unified-plan',
     });
+    if (gen != _gen) {
+      await pc.close();
+      await pc.dispose();
+      throw _stopped;
+    }
+    // Published: from here a stop() closes it, and the awaits below throw.
     _pc = pc;
 
     pc.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
+      if (_pc == pc && event.streams.isNotEmpty) {
         _remoteStream = event.streams.first;
       }
     };
@@ -477,6 +530,13 @@ class PlaybackEngine {
     await pc.setLocalDescription(offer);
 
     final result = await signaling.playOffer(streamId, offer.sdp ?? '');
+    if (gen != _gen) {
+      final resource = result.resourceUrl;
+      if (resource != null) {
+        await signaling.deleteResource(resource);
+      }
+      throw _stopped;
+    }
     _resourceUrl = result.resourceUrl;
     await pc.setRemoteDescription(
       RTCSessionDescription(result.answerSdp, 'answer'),
@@ -485,13 +545,17 @@ class PlaybackEngine {
 
   Future<void> _startScale(
     String streamId,
-    String? deliveryPath, {
+    String? deliveryPath,
+    int gen, {
     bool flv = false,
   }) async {
     final url = deliveryPath == null
         ? signaling.scalePlaylistUrl(streamId)
         : signaling.deliveryUrl(deliveryPath);
     await signaling.ensureScaleReachable(streamId, url);
+    if (gen != _gen) {
+      throw _stopped;
+    }
     // Delivery paths (`/d/wide/{id}`) carry no `.m3u8` extension, and Android's
     // player guesses the container from the URL: without the hint it opens the
     // playlist as a progressive file and fails with UnrecognizedInputFormat.
@@ -501,27 +565,50 @@ class PlaybackEngine {
       Uri.parse(url),
       formatHint: flv ? null : VideoFormat.hls,
     );
+    // Published: from here a stop() disposes it.
     _videoController = controller;
     _flv = flv;
     try {
       await controller.initialize();
     } catch (e) {
-      _videoController = null;
+      if (_videoController == controller) {
+        _videoController = null;
+      }
       await controller.dispose();
+      if (gen != _gen) {
+        throw _stopped;
+      }
       throw MebiusError(
         MebiusErrorCode.connectionFailed,
         'Playback could not be started for this stream.',
         cause: e,
       );
     }
+    if (gen != _gen) {
+      // stop() already disposed it.
+      throw _stopped;
+    }
     await controller.setVolume(_volume);
     await controller.play();
   }
 
-  /// Stops playback and releases resources.
+  /// Stops playback and releases resources. Any open still in flight is
+  /// retired with it.
   Future<void> stop() async {
+    _gen += 1;
+    await _release();
+  }
+
+  /// Releases the current route. Everything is detached before the first
+  /// await, so a route published meanwhile is never the one torn down.
+  Future<void> _release() async {
     final resource = _resourceUrl;
+    final pc = _pc;
+    final controller = _videoController;
     _resourceUrl = null;
+    _pc = null;
+    _remoteStream = null;
+    _videoController = null;
     if (resource != null) {
       await signaling.deleteResource(resource);
     }
@@ -530,13 +617,8 @@ class PlaybackEngine {
     // the real-time route used to always report success, so failover never ran
     // and no connection was ever abandoned. Now every viewer on a dead route
     // would leak one for the session.
-    await _pc?.close();
-    await _pc?.dispose();
-    _pc = null;
-    _remoteStream = null;
-
-    final controller = _videoController;
-    _videoController = null;
+    await pc?.close();
+    await pc?.dispose();
     if (controller != null) {
       await controller.pause();
       await controller.dispose();

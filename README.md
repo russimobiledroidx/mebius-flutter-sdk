@@ -311,16 +311,17 @@ decides the ordering. It is optional, but without it every viewer is served from
 Mebius origin instead of the nearest edge, and on mobile that is billed per
 viewer.
 
-### Quality (1080p / 720p / 480p)
+### Quality (1080p / 720p / 540p / 480p)
 
 A stream published with a rendition ladder offers its rungs in
-`player.qualities`. Without one (the default) the list is empty and nothing
+`player.qualities` — today 1080p, 720p, 540p and 480p at 60 fps (video
+6000 / 3000 / 2000 / 1300 kbps). Without one (the default) the list is empty and nothing
 below changes playback: hide the quality menu. It is also empty in
 `lowLatency` mode, where the real-time route has one quality.
 
 ```dart
 player.qualitiesChanged.listen((qualities) {
-  // [MebiusQuality(1080p, 1080p, 5000 kbps), ...] — empty: no menu.
+  // [MebiusQuality(1080p, 1080p, 6000 kbps), ...] — empty: no menu.
 });
 player.qualityChanged.listen((MebiusQualityChange q) {
   // q.id '720p', q.auto false — or q.id null, q.auto true while adapting.

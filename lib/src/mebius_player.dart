@@ -91,8 +91,8 @@ class MebiusPlayer {
   /// (`playing`, `buffering`, `ended`, `stats`).
   Stream<MebiusPlayerEvent> get events => _events.stream;
 
-  /// The quality ladder this stream offers, e.g. 1080p/720p/480p, limited to
-  /// [setAllowedQualities].
+  /// The quality ladder this stream offers, e.g. 1080p/720p/540p/480p,
+  /// limited to [setAllowedQualities].
   ///
   /// Empty when the stream has no ladder, and in low-latency mode (the
   /// real-time route has one quality): hide the quality menu. Ids are what
@@ -193,12 +193,19 @@ class MebiusPlayer {
     _recovery.reset();
     _stall.reset();
     _opening = true;
+    final session = _session;
     try {
       await _engine.start(streamId);
     } catch (e) {
       throw MebiusError.from(e);
     } finally {
-      _opening = false;
+      // A play retired by stop() must not clear a newer open's flag.
+      if (_session == session) {
+        _opening = false;
+      }
+    }
+    if (_session != session) {
+      return;
     }
     _emit(const MebiusPlayerEvent(MebiusPlayerEventType.playing));
     if (!_qualitiesChanged.isClosed) {
@@ -229,23 +236,21 @@ class MebiusPlayer {
       await _engine.stop();
       await _engine.start(streamId);
     } on Object catch (_) {
-      // Not even auto would open. Hand over to recovery, which keeps trying
-      // with backoff and reports the end if it never comes back.
-      _opening = false;
+      // Stopped meanwhile: the engine retired this open, and the flag and the
+      // engine now belong to whatever came next. Leave both alone.
       if (_session == session) {
+        // Not even auto would open. Hand over to recovery, which keeps trying
+        // with backoff and reports the end if it never comes back.
+        _opening = false;
         unawaited(_recover());
       }
       return;
     }
-    _opening = false;
     if (_disposed || _session != session) {
-      // Stopped while the rung was opening: do not leave it running — unless
-      // a newer play already owns the engine.
-      if (_streamId == null) {
-        await _engine.stop();
-      }
+      // Landed just before a stop(), which released it. Nothing to undo.
       return;
     }
+    _opening = false;
     _stall.reset();
     _emit(const MebiusPlayerEvent(MebiusPlayerEventType.playing));
     await _settled();
@@ -272,6 +277,7 @@ class MebiusPlayer {
     // Retires a recovery that may be sitting in a backoff right now; it checks
     // this on the way out of every await.
     _session += 1;
+    _opening = false;
     _statsTimer?.cancel();
     _statsTimer = null;
     _streamId = null;
@@ -289,6 +295,7 @@ class MebiusPlayer {
     }
     _disposed = true;
     _session += 1;
+    _opening = false;
     _statsTimer?.cancel();
     _streamId = null;
     await _engine.stop();
