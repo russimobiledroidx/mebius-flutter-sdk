@@ -197,6 +197,11 @@ class MebiusPlayer {
     try {
       await _engine.start(streamId);
     } catch (e) {
+      // A play retired by stop() (a quick channel switch) is not a failure the
+      // caller should see: the newer play owns the outcome.
+      if (_session != session) {
+        return;
+      }
       throw MebiusError.from(e);
     } finally {
       // A play retired by stop() must not clear a newer open's flag.
