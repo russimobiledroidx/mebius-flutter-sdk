@@ -7,7 +7,7 @@ library;
 export 'src/mebius.dart' show Mebius;
 export 'src/mebius_broadcaster.dart' show MebiusBroadcaster;
 export 'src/mebius_client.dart' show MebiusClient;
-export 'src/mebius_delivery.dart' show MebiusDelivery;
+export 'src/mebius_delivery.dart' show MebiusDelivery, MebiusQuality;
 export 'src/mebius_error.dart' show MebiusError, MebiusErrorCode;
 export 'src/mebius_events.dart'
     show
@@ -18,6 +18,7 @@ export 'src/mebius_events.dart'
         MebiusClientEventType,
         MebiusPlaybackStats,
         MebiusPlayerEvent,
-        MebiusPlayerEventType;
+        MebiusPlayerEventType,
+        MebiusQualityChange;
 export 'src/mebius_player.dart' show MebiusPlayer, MebiusPlayerMode;
 export 'src/mebius_view.dart' show MebiusView;

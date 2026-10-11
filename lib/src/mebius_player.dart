@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show listEquals, visibleForTesting;
+
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/internal/playback_engine.dart';
 import 'package:mebius/src/internal/recovery.dart';
@@ -42,12 +44,14 @@ class MebiusPlayer {
     required GatewaySignaling signaling,
     required this.mode,
     List<MebiusDelivery> deliveries = const <MebiusDelivery>[],
-  }) : _engine = PlaybackEngine(
-          signaling: signaling,
-          pipeline: mode == MebiusPlayerMode.lowLatency
-              ? PlaybackPipeline.lowLatency
-              : PlaybackPipeline.scale,
-        ) {
+    @visibleForTesting PlaybackEngine? engine,
+  }) : _engine = engine ??
+            PlaybackEngine(
+              signaling: signaling,
+              pipeline: mode == MebiusPlayerMode.lowLatency
+                  ? PlaybackPipeline.lowLatency
+                  : PlaybackPipeline.scale,
+            ) {
     _engine.deliveries = deliveries;
   }
 
@@ -57,6 +61,10 @@ class MebiusPlayer {
   final PlaybackEngine _engine;
   final StreamController<MebiusPlayerEvent> _events =
       StreamController<MebiusPlayerEvent>.broadcast();
+  final StreamController<List<MebiusQuality>> _qualitiesChanged =
+      StreamController<List<MebiusQuality>>.broadcast();
+  final StreamController<MebiusQualityChange> _qualityChanged =
+      StreamController<MebiusQualityChange>.broadcast();
   Timer? _statsTimer;
   bool _disposed = false;
 
@@ -65,6 +73,11 @@ class MebiusPlayer {
   final RecoveryPolicy _recovery = RecoveryPolicy();
   final StallDetector _stall = StallDetector();
   bool _recovering = false;
+
+  /// An open outside recovery is in flight: the first [play], or a reopen for
+  /// a quality change. A quality change made meanwhile is not opened beside
+  /// it; the open in flight catches up when it lands (see [_settled]).
+  bool _opening = false;
 
   /// Bumped by [stop] and [dispose]. A recovery loop can be several seconds deep
   /// in a backoff when the caller gives up, and it must not reopen a route into a
@@ -77,6 +90,89 @@ class MebiusPlayer {
   /// The stream of lifecycle events
   /// (`playing`, `buffering`, `ended`, `stats`).
   Stream<MebiusPlayerEvent> get events => _events.stream;
+
+  /// The quality ladder this stream offers, e.g. 1080p/720p/540p/480p,
+  /// limited to [setAllowedQualities].
+  ///
+  /// Empty when the stream has no ladder, and in low-latency mode (the
+  /// real-time route has one quality): hide the quality menu. Ids are what
+  /// [setQuality] takes.
+  List<MebiusQuality> get qualities => mode == MebiusPlayerMode.lowLatency
+      ? const <MebiusQuality>[]
+      : allowedRungs(_ladder, _engine.allowed);
+
+  List<MebiusQuality> get _ladder => _engine.deliveries
+      .map((d) => d.renditions)
+      .firstWhere((r) => r.isNotEmpty, orElse: () => const <MebiusQuality>[]);
+
+  /// [qualities] once per [play], and whenever [setAllowedQualities] changes it.
+  Stream<List<MebiusQuality>> get qualitiesChanged => _qualitiesChanged.stream;
+
+  /// The quality now playing, after every open that lands. Only fires when
+  /// [qualities] is non-empty.
+  Stream<MebiusQualityChange> get qualityChanged => _qualityChanged.stream;
+
+  /// Plays [idOrAuto]: an id from [qualities], or `"auto"` (the default).
+  ///
+  /// A playing stream is reopened on the new rung, keeping its volume. A pick
+  /// overrides [setMaxQuality]; if the rung will not open, the player falls
+  /// back to auto and reports it. Throws [MebiusError] for an id not in
+  /// [qualities], without touching playback. A no-op in low-latency mode.
+  Future<void> setQuality(String idOrAuto) async {
+    _ensureUsable();
+    if (mode == MebiusPlayerMode.lowLatency) {
+      return;
+    }
+    if (idOrAuto != 'auto' && !qualities.any((q) => q.id == idOrAuto)) {
+      throw MebiusError(
+        MebiusErrorCode.unknown,
+        'Unknown quality "$idOrAuto". Pass "auto", or an id from '
+        'player.qualities.',
+      );
+    }
+    _engine.quality = idOrAuto == 'auto' ? null : idOrAuto;
+    await _reopen();
+  }
+
+  /// Caps auto mode at [height] pixels (e.g. 720); 0 or less removes the cap.
+  ///
+  /// While capped, auto plays the highest allowed rung at or under [height] as
+  /// a fixed rung rather than adapting. A manual [setQuality] pick ignores it.
+  Future<void> setMaxQuality(int height) async {
+    _ensureUsable();
+    _engine.maxHeight = height > 0 ? height : null;
+    await _reopen();
+  }
+
+  /// Limits the rungs this viewer may use, e.g. `['1080p', '720p']` on mobile.
+  ///
+  /// Null or empty allows every rung. Ids not on the ladder are ignored, and a
+  /// list naming none of its rungs allows all of them. [qualities] shrinks to
+  /// the allowed rungs; uncapped auto adapts within them only. A manual pick
+  /// outside the new set returns to auto. Kept across recovery and replays.
+  Future<void> setAllowedQualities(List<String>? ids) async {
+    _ensureUsable();
+    final before = qualities;
+    final ladder = _ladder;
+    final kept = ladder
+        .where((q) => ids?.contains(q.id) ?? false)
+        .map((q) => q.id)
+        .toList(growable: false);
+    // Normalised to the rungs it actually keeps, so an equivalent list does
+    // not count as a change and reopen the stream for nothing.
+    _engine.allowed = kept.isEmpty || kept.length == ladder.length
+        ? null
+        : List.unmodifiable(kept);
+    final after = qualities;
+    final pinned = _engine.quality;
+    if (pinned != null && !after.any((q) => q.id == pinned)) {
+      _engine.quality = null;
+    }
+    if (!listEquals(before, after) && !_qualitiesChanged.isClosed) {
+      _qualitiesChanged.add(after);
+    }
+    await _reopen();
+  }
 
   /// Internal: the live playback engine, used by `MebiusView`.
   PlaybackEngine get engine => _engine;
@@ -96,13 +192,87 @@ class MebiusPlayer {
     _streamId = streamId;
     _recovery.reset();
     _stall.reset();
+    _opening = true;
+    final session = _session;
     try {
       await _engine.start(streamId);
     } catch (e) {
+      // A play retired by stop() (a quick channel switch) is not a failure the
+      // caller should see: the newer play owns the outcome.
+      if (_session != session) {
+        return;
+      }
       throw MebiusError.from(e);
+    } finally {
+      // A play retired by stop() must not clear a newer open's flag.
+      if (_session == session) {
+        _opening = false;
+      }
+    }
+    if (_session != session) {
+      return;
     }
     _emit(const MebiusPlayerEvent(MebiusPlayerEventType.playing));
+    if (!_qualitiesChanged.isClosed) {
+      _qualitiesChanged.add(qualities);
+    }
     _startSupervision();
+    await _settled();
+  }
+
+  /// Reopens a playing stream so a new quality choice takes effect.
+  ///
+  /// Not playing: the choice waits for the next [play]. An open already in
+  /// flight (first play, another reopen, recovery): that open catches up when
+  /// it lands, so two never run side by side.
+  Future<void> _reopen() async {
+    final streamId = _streamId;
+    if (qualities.isEmpty ||
+        streamId == null ||
+        _opening ||
+        _recovering ||
+        !_engine.selectionChanged) {
+      return;
+    }
+    _opening = true;
+    final session = _session;
+    _emit(const MebiusPlayerEvent(MebiusPlayerEventType.buffering));
+    try {
+      await _engine.stop();
+      await _engine.start(streamId);
+    } on Object catch (_) {
+      // Stopped meanwhile: the engine retired this open, and the flag and the
+      // engine now belong to whatever came next. Leave both alone.
+      if (_session == session) {
+        // Not even auto would open. Hand over to recovery, which keeps trying
+        // with backoff and reports the end if it never comes back.
+        _opening = false;
+        unawaited(_recover());
+      }
+      return;
+    }
+    if (_disposed || _session != session) {
+      // Landed just before a stop(), which released it. Nothing to undo.
+      return;
+    }
+    _opening = false;
+    _stall.reset();
+    _emit(const MebiusPlayerEvent(MebiusPlayerEventType.playing));
+    await _settled();
+  }
+
+  /// After an open lands: report what it actually opened, then redo it if the
+  /// choice moved while it was in flight. Latest wins.
+  Future<void> _settled() async {
+    if (qualities.isNotEmpty && !_qualityChanged.isClosed) {
+      _qualityChanged.add(
+        MebiusQualityChange(
+          id: _engine.openedQualityId,
+          auto: _engine.openedAuto,
+        ),
+      );
+    }
+    await _reopen();
   }
 
   /// Stops playback and releases resources.
@@ -112,6 +282,7 @@ class MebiusPlayer {
     // Retires a recovery that may be sitting in a backoff right now; it checks
     // this on the way out of every await.
     _session += 1;
+    _opening = false;
     _statsTimer?.cancel();
     _statsTimer = null;
     _streamId = null;
@@ -129,10 +300,13 @@ class MebiusPlayer {
     }
     _disposed = true;
     _session += 1;
+    _opening = false;
     _statsTimer?.cancel();
     _streamId = null;
     await _engine.stop();
     await _events.close();
+    await _qualitiesChanged.close();
+    await _qualityChanged.close();
   }
 
   static const Duration _tick = Duration(seconds: 2);
@@ -145,7 +319,7 @@ class MebiusPlayer {
   void _startSupervision() {
     _statsTimer?.cancel();
     _statsTimer = Timer.periodic(_tick, (_) async {
-      if (_disposed || _recovering || !_engine.isPlaying) {
+      if (_disposed || _recovering || _opening || !_engine.isPlaying) {
         return;
       }
       final s = await _engine.readStats();
@@ -188,6 +362,7 @@ class MebiusPlayer {
     }
     _recovering = true;
     final session = _session;
+    var recovered = false;
     _emit(const MebiusPlayerEvent(MebiusPlayerEventType.buffering));
     try {
       while (!_disposed && _session == session && !_recovery.exhausted) {
@@ -204,8 +379,11 @@ class MebiusPlayer {
           continue;
         }
         if (_disposed || _session != session) {
-          // Stopped while the route was opening: do not leave it running.
-          await _engine.stop();
+          // Stopped while the route was opening: do not leave it running —
+          // unless a newer play already owns the engine.
+          if (_streamId == null) {
+            await _engine.stop();
+          }
           return;
         }
         // Proven healthy again, so the budget is for CONSECUTIVE failures: a
@@ -214,9 +392,10 @@ class MebiusPlayer {
         _recovery.reset();
         _stall.reset();
         _emit(const MebiusPlayerEvent(MebiusPlayerEventType.playing));
-        return;
+        recovered = true;
+        break;
       }
-      if (!_disposed && _session == session) {
+      if (!recovered && !_disposed && _session == session) {
         // Either the broadcast really is over or this device is off the network;
         // both are the end of the session as far as the app is concerned.
         //
@@ -229,6 +408,9 @@ class MebiusPlayer {
       }
     } finally {
       _recovering = false;
+    }
+    if (recovered) {
+      await _settled();
     }
   }
 

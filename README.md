@@ -311,6 +311,54 @@ decides the ordering. It is optional, but without it every viewer is served from
 Mebius origin instead of the nearest edge, and on mobile that is billed per
 viewer.
 
+### Quality (1080p / 720p / 540p / 480p)
+
+A stream published with a rendition ladder offers its rungs in
+`player.qualities` — today 1080p, 720p, 540p and 480p at 60 fps (video
+6000 / 3000 / 2000 / 1300 kbps). Without one (the default) the list is empty and nothing
+below changes playback: hide the quality menu. It is also empty in
+`lowLatency` mode, where the real-time route has one quality.
+
+```dart
+player.qualitiesChanged.listen((qualities) {
+  // [MebiusQuality(1080p, 1080p, 6000 kbps), ...] — empty: no menu.
+});
+player.qualityChanged.listen((MebiusQualityChange q) {
+  // q.id '720p', q.auto false — or q.id null, q.auto true while adapting.
+});
+
+await player.setQuality('720p'); // reopen on that rung, volume kept
+await player.setQuality('auto'); // default
+await player.setMaxQuality(720); // auto never goes above 720p; 0 clears
+
+// Mobile: never below 720p. Auto adapts 720p <-> 1080p only.
+await player.setAllowedQualities(['1080p', '720p']);
+await player.setAllowedQualities(null); // every rung again
+```
+
+- **Auto** plays the master playlist, and the platform player (ExoPlayer /
+  AVPlayer) switches rungs as bandwidth allows. On Android that means HLS
+  rather than the lower-latency FLV route; FLV stays behind it as a fallback,
+  and picking a rung gets FLV first again.
+- **A manual pick** reopens the player on that rung with the same token. It
+  overrides `setMaxQuality`. If the rung will not open (the encoder may skip a
+  rung larger than the source), the player falls back to auto and reports
+  `auto: true`.
+- **`setMaxQuality`** makes auto play the highest allowed rung at or under the
+  cap, as a fixed rung. A native cap that keeps adapting below it (via a
+  platform channel) is not implemented yet.
+- **`setAllowedQualities`** limits `qualities` and auto to the listed rungs, in
+  ladder order. Ids not on the ladder are ignored; a list naming none of them,
+  `null` or `[]` allows all. A manual pick outside the new set returns to auto.
+  The choice is kept across recovery and later `play` calls.
+- `setQuality` with an id not in `qualities` throws `MebiusError`.
+- Choices made while a route is opening are applied once it lands; the last
+  one wins, and `qualityChanged` always reports what is actually playing.
+
+How the ladder is produced (encoder settings and the gateway's renditions) is
+covered in the Mebius integration guide, sections "Official encoder profile"
+and "Quality renditions".
+
 A full, copy-paste example with both screens, camera switching, mute,
 mode-toggling and a volume slider lives in [`example/lib/main.dart`](example/lib/main.dart).
 
@@ -338,6 +386,12 @@ mode-toggling and a volume slider lives in [`example/lib/main.dart`](example/lib
 | `MebiusPlayer.play` | `Future<void> play(String streamId, [Object? viewTarget])` | Begin playback. |
 | `MebiusPlayer.stop` | `Future<void> stop()` | Stop playback. |
 | `MebiusPlayer.setVolume` | `Future<void> setVolume(double volume)` | Set volume (0..1). |
+| `MebiusPlayer.qualities` | `List<MebiusQuality> qualities` | Rungs this stream offers (`id`, `height`, `bitrateKbps`); empty without a ladder. |
+| `MebiusPlayer.setQuality` | `Future<void> setQuality(String idOrAuto)` | `"auto"` or an id from `qualities`. |
+| `MebiusPlayer.setMaxQuality` | `Future<void> setMaxQuality(int height)` | Cap auto at `height` pixels; 0 clears. |
+| `MebiusPlayer.setAllowedQualities` | `Future<void> setAllowedQualities(List<String>? ids)` | Limit `qualities` and auto to these ids; `null`/`[]` allows all. |
+| `MebiusPlayer.qualitiesChanged` | `Stream<List<MebiusQuality>> qualitiesChanged` | `qualities`, once per `play` and when the allowed set changes it. |
+| `MebiusPlayer.qualityChanged` | `Stream<MebiusQualityChange> qualityChanged` | Quality now playing (`id`, `auto`). |
 | `MebiusPlayer.events` | `Stream<MebiusPlayerEvent> events` | `playing` / `buffering` / `ended` / `stats`. |
 | `MebiusView` | `MebiusView({required MebiusBroadcaster broadcaster})` | Render a broadcaster preview. |
 | `MebiusView.player` | `MebiusView.player({required MebiusPlayer player})` | Render a player surface. |
