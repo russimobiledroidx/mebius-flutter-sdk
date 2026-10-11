@@ -18,6 +18,7 @@ export 'src/mebius_events.dart'
         MebiusClientEventType,
         MebiusPlaybackStats,
         MebiusPlayerEvent,
-        MebiusPlayerEventType;
+        MebiusPlayerEventType,
+        MebiusQualityChange;
 export 'src/mebius_player.dart' show MebiusPlayer, MebiusPlayerMode;
 export 'src/mebius_view.dart' show MebiusView;

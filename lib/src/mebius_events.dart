@@ -152,3 +152,28 @@ class MebiusPlayerEvent {
   String toString() => 'MebiusPlayerEvent(${type.name}'
       '${stats != null ? ', $stats' : ''})';
 }
+
+/// The quality a player is now playing, from `MebiusPlayer.qualityChanged`.
+@immutable
+class MebiusQualityChange {
+  /// Creates a quality-change payload.
+  const MebiusQualityChange({required this.id, required this.auto});
+
+  /// The rendition id playing, or null while the platform player adapts
+  /// between rungs on its own (auto on the master playlist) or plays source.
+  final String? id;
+
+  /// Whether Mebius chose it (`setQuality('auto')`, or a pinned rung that
+  /// would not open) rather than the viewer.
+  final bool auto;
+
+  @override
+  bool operator ==(Object other) =>
+      other is MebiusQualityChange && other.id == id && other.auto == auto;
+
+  @override
+  int get hashCode => Object.hash(id, auto);
+
+  @override
+  String toString() => 'MebiusQualityChange(id: $id, auto: $auto)';
+}

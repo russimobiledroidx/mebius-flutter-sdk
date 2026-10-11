@@ -40,15 +40,20 @@ const Duration kFirstFrameTimeout = Duration(seconds: 8);
 /// [path] is null for the WebRTC route, which is signaled rather than fetched
 /// and therefore never appears in the gateway's delivery list.
 class PlaybackCandidate {
-  const PlaybackCandidate(this.pipeline, [this.path]) : flv = false;
+  const PlaybackCandidate(this.pipeline, [this.path, this.qualityId])
+      : flv = false;
 
   /// The `fast` route at [path], played as HTTP-FLV.
-  const PlaybackCandidate.flv(this.path)
+  const PlaybackCandidate.flv(this.path, [this.qualityId])
       : pipeline = PlaybackPipeline.scale,
         flv = true;
 
   final PlaybackPipeline pipeline;
   final String? path;
+
+  /// The rendition this route opens, or null when it is not one fixed rung
+  /// (source quality, or a master playlist the platform player adapts over).
+  final String? qualityId;
 
   /// The buffered `fast` route: HTTP-FLV, one long-lived response rather than
   /// a playlist. Played as a progressive stream, never with an HLS hint.
@@ -91,81 +96,131 @@ bool get platformPlaysFlv =>
 /// see [platformPlaysFlv]: on a player without an FLV demuxer it is a route
 /// that could never play.
 ///
-/// [quality] (a rendition id, null for auto) and [maxHeight] choose which rung
-/// of a laddered route is opened — see [pickRendition]. Routes without
-/// renditions are untouched by either.
+/// [quality] (a rendition id, null for auto), [maxHeight] and [allowed]
+/// choose which rung of a laddered route is opened. Routes without
+/// renditions are untouched by all three.
 List<PlaybackCandidate> buildCandidates(
   PlaybackPipeline preferred,
   List<MebiusDelivery> deliveries, {
   bool flv = false,
   String? quality,
   int? maxHeight,
+  List<String>? allowed,
 }) {
   final out = <PlaybackCandidate>[];
   if (preferred == PlaybackPipeline.lowLatency) {
     out.add(const PlaybackCandidate(PlaybackPipeline.lowLatency));
   }
-  // Uncapped auto on a laddered stream plays the `wide` master playlist, so
-  // the platform player's own ABR (ExoPlayer/AVPlayer) picks the rung. The FLV
-  // route is skipped for it: FLV has no master, and adapting it here would
-  // mean our own buffering heuristic stepping rungs. The cost is HLS latency
-  // instead of FLV latency in auto; a manual pick or a cap still opens FLV.
-  final nativeAbr = quality == null &&
-      maxHeight == null &&
-      deliveries.any(
-        (d) => d.kind == 'wide' && d.isResolvable && d.renditions.isNotEmpty,
-      );
-  for (final d in deliveries) {
-    if (!d.isResolvable) {
-      continue;
+  final usable = deliveries.where((d) => d.isResolvable);
+  if (quality != null) {
+    // A pinned rung opens only as that rung. When no route has it (or none of
+    // them opens) the list runs dry and the engine falls back to auto, rather
+    // than quietly playing source under a label that says otherwise.
+    for (final d in usable) {
+      final rung = d.renditions.where((r) => r.id == quality).firstOrNull;
+      if (rung == null) {
+        continue;
+      }
+      if (d.kind == 'fast' && flv) {
+        out.add(PlaybackCandidate.flv(rung.path, rung.id));
+      } else if (d.kind == 'wide') {
+        out.add(PlaybackCandidate(PlaybackPipeline.scale, rung.path, rung.id));
+      }
     }
-    final path =
-        pickRendition(d.renditions, quality: quality, maxHeight: maxHeight)
-                ?.path ??
-            d.path;
+    return out;
+  }
+  // Uncapped auto on a laddered stream plays the `wide` master playlist first,
+  // so the platform player's own ABR (ExoPlayer/AVPlayer) picks the rung —
+  // within [allowed], which the gateway applies to the master via `q`. FLV has
+  // no master, so it moves behind `wide` as a fallback: adapting it would
+  // mean our own buffering heuristic stepping rungs. The cost is HLS latency
+  // instead of FLV latency in auto; a manual pick or a cap still opens FLV
+  // first.
+  final nativeAbr = maxHeight == null &&
+      usable.any((d) => d.kind == 'wide' && d.renditions.isNotEmpty);
+  PlaybackCandidate? deferredFlv;
+  for (final d in usable) {
+    final rungs = allowedRungs(d.renditions, allowed);
+    final restricted =
+        maxHeight != null || rungs.length < d.renditions.length;
     // "fast" (HTTP-FLV) only where the platform player can demux FLV; the
     // gateway lists it first, so it is tried first and `wide` stays the
     // fallback. Elsewhere it is a route that could never play.
-    if (d.kind == 'fast' && flv && !nativeAbr) {
-      out.add(PlaybackCandidate.flv(path));
-    } else if (d.kind == 'wide' || d.kind == 'local') {
-      out.add(PlaybackCandidate(PlaybackPipeline.scale, path));
+    if (d.kind == 'fast' && flv) {
+      // Highest allowed rung under the cap; source when nothing restricts it.
+      final rung = restricted ? pickRendition(rungs, maxHeight) : null;
+      final c = PlaybackCandidate.flv(rung?.path ?? d.path, rung?.id);
+      if (nativeAbr) {
+        deferredFlv = c;
+      } else {
+        out.add(c);
+      }
+    } else if (d.kind == 'wide') {
+      final rung = maxHeight != null ? pickRendition(rungs, maxHeight) : null;
+      out.add(
+        PlaybackCandidate(
+          PlaybackPipeline.scale,
+          rung?.path ??
+              (restricted && rungs.isNotEmpty
+                  ? _withQuery(d.path, rungs)
+                  : d.path),
+          rung?.id,
+        ),
+      );
+      if (deferredFlv != null) {
+        out.add(deferredFlv);
+        deferredFlv = null;
+      }
+    } else if (d.kind == 'local') {
+      out.add(PlaybackCandidate(PlaybackPipeline.scale, d.path));
     }
+  }
+  // Only reachable if the gateway ever listed `wide` before `fast`.
+  if (deferredFlv != null) {
+    out.add(deferredFlv);
   }
   // Origin playlist, addressed without a delivery path.
   out.add(const PlaybackCandidate(PlaybackPipeline.scale));
   return out;
 }
 
-/// The rung of [renditions] to open, or null to open the route's own path.
+/// The master playlist [path] limited to [rungs]: the gateway drops every
+/// variant not named in `q`. The token is appended after it as usual.
+String _withQuery(String path, List<MebiusQuality> rungs) {
+  final ids = rungs.map((r) => Uri.encodeQueryComponent(r.id)).join(',');
+  return '$path${path.contains('?') ? '&' : '?'}q=$ids';
+}
+
+/// The rungs of [ladder] named in [allowed], in ladder order.
 ///
-/// A manual [quality] opens that rung (null if this route lacks it, so the
-/// route falls back to source). Auto with a [maxHeight] opens the highest rung
-/// at or under it — the lowest rung when none fits. Uncapped auto opens the
-/// route's own path: the master playlist on `wide`, source on the rest.
+/// Null or empty [allowed] means every rung, and so does a set that names
+/// none of them: a filter that leaves nothing to play is ignored rather than
+/// turning a laddered stream into an unplayable one.
+List<MebiusQuality> allowedRungs(
+  List<MebiusQuality> ladder,
+  List<String>? allowed,
+) {
+  if (allowed == null || allowed.isEmpty) {
+    return ladder;
+  }
+  final kept = ladder.where((r) => allowed.contains(r.id)).toList();
+  return kept.isEmpty ? ladder : kept;
+}
+
+/// The highest of [rungs] at or under [maxHeight] (no cap when null) — the
+/// lowest rung when none fits. Null only for an empty ladder.
 ///
 /// ponytail: a cap pins one fixed rung, so capped auto does not adapt below
 /// it. A native cap over a platform channel (ExoPlayer track-selection max
 /// video size, AVPlayer `preferredMaximumResolution`) on the master playlist
 /// would keep ABR under the cap; add it when a capped viewer needs to adapt.
-MebiusQuality? pickRendition(
-  List<MebiusQuality> renditions, {
-  String? quality,
-  int? maxHeight,
-}) {
-  if (renditions.isEmpty) {
+MebiusQuality? pickRendition(List<MebiusQuality> rungs, int? maxHeight) {
+  if (rungs.isEmpty) {
     return null;
   }
-  if (quality != null) {
-    return renditions.where((r) => r.id == quality).firstOrNull;
-  }
-  if (maxHeight == null) {
-    return null;
-  }
-  final byHeight = [...renditions]
-    ..sort((a, b) => b.height.compareTo(a.height));
+  final byHeight = [...rungs]..sort((a, b) => b.height.compareTo(a.height));
   return byHeight.firstWhere(
-    (r) => r.height <= maxHeight,
+    (r) => maxHeight == null || r.height <= maxHeight,
     orElse: () => byHeight.last,
   );
 }
@@ -231,6 +286,25 @@ class PlaybackEngine {
   /// Auto-mode height cap, or null for none. Read on every [start].
   int? maxHeight;
 
+  /// Rendition ids auto may use, or null for all. Read on every [start].
+  List<String>? allowed;
+
+  /// What the last successful [start] opened: the rung id (null when not one
+  /// fixed rung), and whether auto chose it.
+  String? openedQualityId;
+  bool openedAuto = true;
+  String? _openedKey;
+
+  /// Whether the quality choice moved since the last successful [start] —
+  /// the open that landed is stale and should be redone (latest wins).
+  bool get selectionChanged =>
+      _openedKey != _selectionKey(quality, maxHeight, allowed);
+
+  // A manual pick overrides the cap and the allowed set, so they are not part
+  // of its key.
+  static String _selectionKey(String? q, int? cap, List<String>? allowed) =>
+      q != null ? 'q:$q' : 'auto:$cap:${allowed?.join(',')}';
+
   // Low-latency (WebRTC) state.
   RTCPeerConnection? _pc;
   MediaStream? _remoteStream;
@@ -262,23 +336,40 @@ class PlaybackEngine {
     if (isPlaying) {
       return;
     }
+    final pinned = quality;
+    if (pinned != null) {
+      try {
+        await _walk(streamId, pinned);
+        return;
+      } on Object catch (_) {
+        // A pinned rung that will not open — the vendor may skip a rung larger
+        // than the source — falls back to auto rather than failing. Unless the
+        // viewer already picked something else meanwhile.
+        if (quality == pinned) {
+          quality = null;
+        }
+      }
+    }
+    await _walk(streamId, null);
+  }
+
+  Future<void> _walk(String streamId, String? pinned) async {
+    final cap = maxHeight;
+    final allow = allowed;
     Object? lastError;
-    for (final candidate
-        in buildCandidates(
+    for (final candidate in buildCandidates(
       pipeline,
       deliveries,
       flv: platformPlaysFlv,
-      quality: quality,
-      maxHeight: maxHeight,
+      quality: pinned,
+      maxHeight: cap,
+      allowed: allow,
     )) {
       try {
-        switch (candidate.pipeline) {
-          case PlaybackPipeline.lowLatency:
-            await _startLowLatency(streamId);
-          case PlaybackPipeline.scale:
-            await _startScale(streamId, candidate.path, flv: candidate.flv);
-        }
-        if (await _awaitFirstFrame()) {
+        if (await openCandidate(streamId, candidate)) {
+          openedQualityId = candidate.qualityId;
+          openedAuto = pinned == null;
+          _openedKey = _selectionKey(pinned, cap, allow);
           return;
         }
         lastError = const MebiusError(
@@ -299,6 +390,19 @@ class PlaybackEngine {
             'No Mebius route could play this stream.',
           ),
     );
+  }
+
+  /// Opens one route and resolves whether it produced a first frame. The seam
+  /// tests replace to drive route outcomes without a platform player.
+  @visibleForTesting
+  Future<bool> openCandidate(String streamId, PlaybackCandidate candidate) async {
+    switch (candidate.pipeline) {
+      case PlaybackPipeline.lowLatency:
+        await _startLowLatency(streamId);
+      case PlaybackPipeline.scale:
+        await _startScale(streamId, candidate.path, flv: candidate.flv);
+    }
+    return _awaitFirstFrame();
   }
 
   /// Resolves true once the stream is actually rendering, false on timeout.

@@ -1,3 +1,5 @@
+import 'package:meta/meta.dart';
+
 /// One playback route Mebius has prepared for a stream.
 ///
 /// Your backend receives this list alongside the access token; hand it to
@@ -70,7 +72,8 @@ class MebiusDelivery {
   bool get isResolvable => _resolvable(path);
 
   @override
-  String toString() => 'MebiusDelivery(kind: $kind, path: $path)';
+  String toString() =>
+      'MebiusDelivery(kind: $kind, path: $path, renditions: $renditions)';
 }
 
 bool _resolvable(String path) =>
@@ -79,6 +82,7 @@ bool _resolvable(String path) =>
 /// One rung of a stream's quality ladder, e.g. 720p.
 ///
 /// Read from `MebiusPlayer.qualities`; pass [id] to `MebiusPlayer.setQuality`.
+@immutable
 class MebiusQuality {
   /// Creates a quality rung.
   const MebiusQuality({
@@ -124,6 +128,17 @@ class MebiusQuality {
 
   /// Mebius-relative path of this rung. Opaque to your app.
   final String path;
+
+  @override
+  bool operator ==(Object other) =>
+      other is MebiusQuality &&
+      other.id == id &&
+      other.height == height &&
+      other.bitrateKbps == bitrateKbps &&
+      other.path == path;
+
+  @override
+  int get hashCode => Object.hash(id, height, bitrateKbps, path);
 
   @override
   String toString() => 'MebiusQuality($id, ${height}p, $bitrateKbps kbps)';
