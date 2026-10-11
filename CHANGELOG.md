@@ -1,3 +1,18 @@
+## 0.6.0
+
+- Quality selection for streams with a rendition ladder (1080p/720p/480p).
+  `MebiusPlayer.qualities`, `setQuality("auto" | id)`, `setMaxQuality(height)`,
+  and the `qualitiesChanged` / `qualityChanged` streams — the same names as the
+  web, Android and iOS SDKs. Deliveries now read an optional `renditions` list
+  (`MebiusDelivery.renditions`, `MebiusQuality`).
+- Auto on a laddered stream plays the `wide` master playlist, so ExoPlayer and
+  AVPlayer adapt between rungs natively; on Android that is HLS instead of the
+  `fast` (FLV) route. A manual pick reopens the player on that rung — FLV on
+  Android, `wide` elsewhere — keeping the volume. `setMaxQuality` makes auto
+  play the highest rung at or under the cap.
+- Streams without `renditions` behave exactly as in 0.5.1: `qualities` is
+  empty and route selection is unchanged.
+
 ## 0.5.1
 
 - Android no longer reopens a healthy `fast` (HTTP-FLV) route every ~14 s.

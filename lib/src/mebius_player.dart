@@ -57,6 +57,10 @@ class MebiusPlayer {
   final PlaybackEngine _engine;
   final StreamController<MebiusPlayerEvent> _events =
       StreamController<MebiusPlayerEvent>.broadcast();
+  final StreamController<List<MebiusQuality>> _qualitiesChanged =
+      StreamController<List<MebiusQuality>>.broadcast();
+  final StreamController<({String id, bool auto})> _qualityChanged =
+      StreamController<({String id, bool auto})>.broadcast();
   Timer? _statsTimer;
   bool _disposed = false;
 
@@ -77,6 +81,54 @@ class MebiusPlayer {
   /// The stream of lifecycle events
   /// (`playing`, `buffering`, `ended`, `stats`).
   Stream<MebiusPlayerEvent> get events => _events.stream;
+
+  /// The quality ladder this stream offers, e.g. 1080p/720p/480p.
+  ///
+  /// Empty when the stream has no ladder: hide the quality menu. Ids are what
+  /// [setQuality] takes.
+  List<MebiusQuality> get qualities => _engine.deliveries
+      .map((d) => d.renditions)
+      .firstWhere((r) => r.isNotEmpty, orElse: () => const <MebiusQuality>[]);
+
+  /// [qualities] as of the last route accepted; fires once per [play].
+  Stream<List<MebiusQuality>> get qualitiesChanged => _qualitiesChanged.stream;
+
+  /// The quality now playing: a rendition id, with `auto` true when Mebius
+  /// chose it. Uncapped auto reports id `"auto"` — the platform player adapts
+  /// between rungs on its own. Only fires when [qualities] is non-empty.
+  Stream<({String id, bool auto})> get qualityChanged =>
+      _qualityChanged.stream;
+
+  /// Plays [idOrAuto]: an id from [qualities], or `"auto"` (the default).
+  ///
+  /// A playing stream is reopened on the new rung, keeping its volume. Throws
+  /// [MebiusError] for an id that is not in [qualities], without touching
+  /// playback.
+  Future<void> setQuality(String idOrAuto) async {
+    _ensureUsable();
+    if (idOrAuto != 'auto' && !qualities.any((q) => q.id == idOrAuto)) {
+      throw MebiusError(
+        MebiusErrorCode.unknown,
+        'Unknown quality "$idOrAuto". Pass "auto", or an id from '
+        'player.qualities.',
+      );
+    }
+    _engine.quality = idOrAuto == 'auto' ? null : idOrAuto;
+    await _reopen();
+  }
+
+  /// Caps auto mode at [height] pixels (e.g. 720); 0 or less removes the cap.
+  ///
+  /// While capped, auto plays the highest rung at or under [height] as a fixed
+  /// rung rather than adapting. Has no effect on a manual [setQuality] pick, or
+  /// on a stream without [qualities].
+  Future<void> setMaxQuality(int height) async {
+    _ensureUsable();
+    _engine.maxHeight = height > 0 ? height : null;
+    if (_engine.quality == null) {
+      await _reopen();
+    }
+  }
 
   /// Internal: the live playback engine, used by `MebiusView`.
   PlaybackEngine get engine => _engine;
@@ -102,7 +154,53 @@ class MebiusPlayer {
       throw MebiusError.from(e);
     }
     _emit(const MebiusPlayerEvent(MebiusPlayerEventType.playing));
+    if (!_qualitiesChanged.isClosed) {
+      _qualitiesChanged.add(qualities);
+    }
+    _emitQuality();
     _startSupervision();
+  }
+
+  /// Reopens a playing stream so a new quality choice takes effect. Not
+  /// playing: the choice waits for the next [play]. Recovering: the recovery's
+  /// own reopen reads the new choice.
+  Future<void> _reopen() async {
+    final streamId = _streamId;
+    if (qualities.isEmpty || streamId == null || _recovering) {
+      return;
+    }
+    _recovering = true;
+    final session = _session;
+    _emit(const MebiusPlayerEvent(MebiusPlayerEventType.buffering));
+    try {
+      await _engine.stop();
+      await _engine.start(streamId);
+    } on Object catch (_) {
+      // The rung refused to open. Hand over to recovery, which keeps trying
+      // with backoff and reports the end if it never comes back.
+      _recovering = false;
+      unawaited(_recover());
+      return;
+    }
+    _recovering = false;
+    if (_disposed || _session != session) {
+      // Stopped while the rung was opening: do not leave it running.
+      await _engine.stop();
+      return;
+    }
+    _stall.reset();
+    _emit(const MebiusPlayerEvent(MebiusPlayerEventType.playing));
+    _emitQuality();
+  }
+
+  void _emitQuality() {
+    final q = qualities;
+    if (q.isEmpty || _qualityChanged.isClosed) {
+      return;
+    }
+    final manual = _engine.quality;
+    final rung = pickRendition(q, quality: manual, maxHeight: _engine.maxHeight);
+    _qualityChanged.add((id: rung?.id ?? 'auto', auto: manual == null));
   }
 
   /// Stops playback and releases resources.
@@ -133,6 +231,8 @@ class MebiusPlayer {
     _streamId = null;
     await _engine.stop();
     await _events.close();
+    await _qualitiesChanged.close();
+    await _qualityChanged.close();
   }
 
   static const Duration _tick = Duration(seconds: 2);

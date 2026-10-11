@@ -90,31 +90,84 @@ bool get platformPlaysFlv =>
 /// The buffered `fast` route (HTTP-FLV) is included only when [flv] is set —
 /// see [platformPlaysFlv]: on a player without an FLV demuxer it is a route
 /// that could never play.
+///
+/// [quality] (a rendition id, null for auto) and [maxHeight] choose which rung
+/// of a laddered route is opened — see [pickRendition]. Routes without
+/// renditions are untouched by either.
 List<PlaybackCandidate> buildCandidates(
   PlaybackPipeline preferred,
   List<MebiusDelivery> deliveries, {
   bool flv = false,
+  String? quality,
+  int? maxHeight,
 }) {
   final out = <PlaybackCandidate>[];
   if (preferred == PlaybackPipeline.lowLatency) {
     out.add(const PlaybackCandidate(PlaybackPipeline.lowLatency));
   }
+  // Uncapped auto on a laddered stream plays the `wide` master playlist, so
+  // the platform player's own ABR (ExoPlayer/AVPlayer) picks the rung. The FLV
+  // route is skipped for it: FLV has no master, and adapting it here would
+  // mean our own buffering heuristic stepping rungs. The cost is HLS latency
+  // instead of FLV latency in auto; a manual pick or a cap still opens FLV.
+  final nativeAbr = quality == null &&
+      maxHeight == null &&
+      deliveries.any(
+        (d) => d.kind == 'wide' && d.isResolvable && d.renditions.isNotEmpty,
+      );
   for (final d in deliveries) {
     if (!d.isResolvable) {
       continue;
     }
+    final path =
+        pickRendition(d.renditions, quality: quality, maxHeight: maxHeight)
+                ?.path ??
+            d.path;
     // "fast" (HTTP-FLV) only where the platform player can demux FLV; the
     // gateway lists it first, so it is tried first and `wide` stays the
     // fallback. Elsewhere it is a route that could never play.
-    if (d.kind == 'fast' && flv) {
-      out.add(PlaybackCandidate.flv(d.path));
+    if (d.kind == 'fast' && flv && !nativeAbr) {
+      out.add(PlaybackCandidate.flv(path));
     } else if (d.kind == 'wide' || d.kind == 'local') {
-      out.add(PlaybackCandidate(PlaybackPipeline.scale, d.path));
+      out.add(PlaybackCandidate(PlaybackPipeline.scale, path));
     }
   }
   // Origin playlist, addressed without a delivery path.
   out.add(const PlaybackCandidate(PlaybackPipeline.scale));
   return out;
+}
+
+/// The rung of [renditions] to open, or null to open the route's own path.
+///
+/// A manual [quality] opens that rung (null if this route lacks it, so the
+/// route falls back to source). Auto with a [maxHeight] opens the highest rung
+/// at or under it — the lowest rung when none fits. Uncapped auto opens the
+/// route's own path: the master playlist on `wide`, source on the rest.
+///
+/// ponytail: a cap pins one fixed rung, so capped auto does not adapt below
+/// it. A native cap over a platform channel (ExoPlayer track-selection max
+/// video size, AVPlayer `preferredMaximumResolution`) on the master playlist
+/// would keep ABR under the cap; add it when a capped viewer needs to adapt.
+MebiusQuality? pickRendition(
+  List<MebiusQuality> renditions, {
+  String? quality,
+  int? maxHeight,
+}) {
+  if (renditions.isEmpty) {
+    return null;
+  }
+  if (quality != null) {
+    return renditions.where((r) => r.id == quality).firstOrNull;
+  }
+  if (maxHeight == null) {
+    return null;
+  }
+  final byHeight = [...renditions]
+    ..sort((a, b) => b.height.compareTo(a.height));
+  return byHeight.firstWhere(
+    (r) => r.height <= maxHeight,
+    orElse: () => byHeight.last,
+  );
 }
 
 /// Video frames the decoder has actually produced, from a `getStats()` snapshot.
@@ -172,6 +225,12 @@ class PlaybackEngine {
   /// Routes supplied by the gateway, in the gateway's preferred order.
   List<MebiusDelivery> deliveries = const <MebiusDelivery>[];
 
+  /// Chosen rendition id, or null for auto. Read on every [start].
+  String? quality;
+
+  /// Auto-mode height cap, or null for none. Read on every [start].
+  int? maxHeight;
+
   // Low-latency (WebRTC) state.
   RTCPeerConnection? _pc;
   MediaStream? _remoteStream;
@@ -205,7 +264,13 @@ class PlaybackEngine {
     }
     Object? lastError;
     for (final candidate
-        in buildCandidates(pipeline, deliveries, flv: platformPlaysFlv)) {
+        in buildCandidates(
+      pipeline,
+      deliveries,
+      flv: platformPlaysFlv,
+      quality: quality,
+      maxHeight: maxHeight,
+    )) {
       try {
         switch (candidate.pipeline) {
           case PlaybackPipeline.lowLatency:

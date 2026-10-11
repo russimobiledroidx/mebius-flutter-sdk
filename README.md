@@ -311,6 +311,38 @@ decides the ordering. It is optional, but without it every viewer is served from
 Mebius origin instead of the nearest edge, and on mobile that is billed per
 viewer.
 
+### Quality (1080p / 720p / 480p)
+
+A stream published with a rendition ladder offers its rungs in
+`player.qualities`. Without one (the default) the list is empty and nothing
+below changes playback: hide the quality menu.
+
+```dart
+player.qualitiesChanged.listen((qualities) {
+  // [MebiusQuality(1080p, 1080p, 5000 kbps), ...] — empty: no menu.
+});
+player.qualityChanged.listen((q) {
+  // (id: '720p', auto: false), or (id: 'auto', auto: true) while adapting.
+});
+
+await player.setQuality('720p'); // reopen on that rung, volume kept
+await player.setQuality('auto'); // default
+await player.setMaxQuality(720); // auto never goes above 720p; 0 clears
+```
+
+- **Auto** plays the master playlist, and the platform player (ExoPlayer /
+  AVPlayer) switches rungs as bandwidth allows. On Android that means HLS
+  rather than the lower-latency FLV route; pick a rung to get FLV back.
+- **A manual pick** reopens the player on that rung with the same token.
+- **`setMaxQuality`** makes auto play the highest rung at or under the cap, as
+  a fixed rung. A native cap that keeps adapting below it (via a platform
+  channel) is not implemented yet.
+- `setQuality` with an id not in `qualities` throws `MebiusError`.
+
+The ladder comes from the encoder and the gateway: see the stream-engine
+[`docs/INTEGRATION.md`](https://github.com/Monarch-Inti-Teknologi/shortie-stream-engine/blob/main/docs/INTEGRATION.md)
+§3.1 "Official encoder profile" and §5.9 "Quality renditions".
+
 A full, copy-paste example with both screens, camera switching, mute,
 mode-toggling and a volume slider lives in [`example/lib/main.dart`](example/lib/main.dart).
 
@@ -338,6 +370,11 @@ mode-toggling and a volume slider lives in [`example/lib/main.dart`](example/lib
 | `MebiusPlayer.play` | `Future<void> play(String streamId, [Object? viewTarget])` | Begin playback. |
 | `MebiusPlayer.stop` | `Future<void> stop()` | Stop playback. |
 | `MebiusPlayer.setVolume` | `Future<void> setVolume(double volume)` | Set volume (0..1). |
+| `MebiusPlayer.qualities` | `List<MebiusQuality> qualities` | Rungs this stream offers (`id`, `height`, `bitrateKbps`); empty without a ladder. |
+| `MebiusPlayer.setQuality` | `Future<void> setQuality(String idOrAuto)` | `"auto"` or an id from `qualities`. |
+| `MebiusPlayer.setMaxQuality` | `Future<void> setMaxQuality(int height)` | Cap auto at `height` pixels; 0 clears. |
+| `MebiusPlayer.qualitiesChanged` | `Stream<List<MebiusQuality>> qualitiesChanged` | `qualities`, once per `play`. |
+| `MebiusPlayer.qualityChanged` | `Stream<({String id, bool auto})> qualityChanged` | Quality now playing. |
 | `MebiusPlayer.events` | `Stream<MebiusPlayerEvent> events` | `playing` / `buffering` / `ended` / `stats`. |
 | `MebiusView` | `MebiusView({required MebiusBroadcaster broadcaster})` | Render a broadcaster preview. |
 | `MebiusView.player` | `MebiusView.player({required MebiusPlayer player})` | Render a player surface. |
