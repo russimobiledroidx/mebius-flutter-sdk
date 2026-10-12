@@ -8,18 +8,24 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:mebius/mebius.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
+import 'package:mebius/src/internal/playback_engine.dart';
 import 'package:video_player_platform_interface/video_player_platform_interface.dart';
 
-/// AVPlayer on iOS live HLS, as video_player sees it: the reported duration is
-/// the live window, and the platform playhead runs on past it. video_player
-/// clamps `value.position` to that duration; the platform does not.
+/// What a live stream's duration reads as in Dart: ExoPlayer's TIME_UNSET
+/// overflows to exactly 1 ms, and video_player clamps `value.position` to it.
+const _liveDuration = Duration(milliseconds: 1);
+
+/// A platform player for one live stream, as video_player sees it: a
+/// meaningless duration, and a platform playhead given by [positionAt].
 class _LivePlatform extends VideoPlayerPlatform {
-  _LivePlatform({required this.duration, required this.positionAt});
+  _LivePlatform({required this.positionAt, this.duration = _liveDuration});
 
   final Duration duration;
   final Duration Function(Duration sinceOpen) positionAt;
   int opened = 0;
+  int callsAfterDispose = 0;
   final Map<int, DateTime> _openedAt = {};
+  final Set<int> _disposed = {};
   final Map<int, StreamController<VideoEvent>> _events = {};
 
   @override
@@ -52,11 +58,17 @@ class _LivePlatform extends VideoPlayerPlatform {
   }
 
   @override
-  Future<Duration> getPosition(int playerId) async =>
-      positionAt(clock.now().difference(_openedAt[playerId]!));
+  Future<Duration> getPosition(int playerId) async {
+    if (_disposed.contains(playerId)) {
+      // What a released native player does when asked anyway.
+      callsAfterDispose += 1;
+      throw StateError('player $playerId is disposed');
+    }
+    return positionAt(clock.now().difference(_openedAt[playerId]!));
+  }
 
   @override
-  Future<void> dispose(int playerId) async {}
+  Future<void> dispose(int playerId) async => _disposed.add(playerId);
 
   @override
   Future<void> setLooping(int playerId, bool looping) async {}
@@ -80,16 +92,25 @@ class _LivePlatform extends VideoPlayerPlatform {
   Future<void> seekTo(int playerId, Duration position) async {}
 }
 
-/// Plays one HLS route on [platform] for [watch] of fake time and reports how
-/// many times the route was opened and what the player said.
-({int opens, List<MebiusPlayerEventType> events, Duration? clamped}) _watch(
-  _LivePlatform platform, {
-  required Duration watch,
-}) {
+/// Android live HLS: the playhead is relative to the live window, so it rises
+/// for one [segment] and then drops back by one on each playlist refresh.
+Duration Function(Duration) _sawtooth(Duration segment) => (t) =>
+    const Duration(seconds: 12) +
+    Duration(microseconds: t.inMicroseconds % segment.inMicroseconds);
+
+/// Plays one HLS route on [platform] for [watch] of fake time, then disposes
+/// the player and reports what happened.
+({
+  int opens,
+  List<MebiusPlayerEventType> events,
+  Duration? clamped,
+  int timersLeft,
+}) _watch(_LivePlatform platform, {required Duration watch}) {
   late ({
     int opens,
     List<MebiusPlayerEventType> events,
     Duration? clamped,
+    int timersLeft,
   }) out;
   fakeAsync((async) {
     VideoPlayerPlatform.instance = platform;
@@ -106,72 +127,113 @@ class _LivePlatform extends VideoPlayerPlatform {
     player.events.listen((e) => events.add(e.type));
     unawaited(player.play('s1'));
     async.elapse(watch);
+    final clamped = player.engine.videoController?.value.position;
+    unawaited(player.dispose());
+    async.elapse(const Duration(seconds: 5));
     out = (
       opens: platform.opened,
-      events: List.of(events),
-      clamped: player.engine.videoController?.value.position,
+      events: events,
+      clamped: clamped,
+      timersLeft: async.periodicTimerCount,
     );
-    unawaited(player.dispose());
-    async.flushMicrotasks();
   });
   return out;
 }
 
+int _count(List<MebiusPlayerEventType> events, MebiusPlayerEventType type) =>
+    events.where((e) => e == type).length;
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('iOS live HLS: a playhead clamped at the 6 s duration is not a stall',
+  test('iOS live HLS: a playhead clamped to the 1 ms duration is not a stall',
       () {
     // The device log: AVPlayer playing, the SDK tearing it down every ~12 s.
     final r = _watch(
-      _LivePlatform(
-        duration: const Duration(seconds: 6),
-        positionAt: (t) => t,
-      ),
+      _LivePlatform(positionAt: (t) => const Duration(seconds: 30) + t),
       watch: const Duration(seconds: 60),
     );
-    // The reproduction holds: video_player's own position is stuck at 6 s.
-    expect(r.clamped, const Duration(seconds: 6));
+    // The reproduction holds: video_player's own position is stuck.
+    expect(r.clamped, _liveDuration);
     expect(r.opens, 1, reason: 'no reopen over 60 s of a moving picture');
-    expect(r.events, [
-      MebiusPlayerEventType.buffering,
-      MebiusPlayerEventType.playing,
-      ...List.filled(r.events.length - 2, MebiusPlayerEventType.stats),
-    ]);
+    expect(_count(r.events, MebiusPlayerEventType.buffering), 1);
+    expect(r.timersLeft, 0, reason: 'nothing keeps polling after dispose');
   });
 
+  for (final seconds in [2, 6]) {
+    test('Android live HLS: a ${seconds}s-segment sawtooth playhead is not a '
+        'stall', () {
+      final r = _watch(
+        _LivePlatform(positionAt: _sawtooth(Duration(seconds: seconds))),
+        watch: const Duration(seconds: 60),
+      );
+      expect(r.opens, 1);
+      expect(_count(r.events, MebiusPlayerEventType.buffering), 1);
+      expect(r.timersLeft, 0);
+    });
+  }
+
   test('a truly frozen platform playhead still recovers at ~10–12 s', () {
-    final platform = _LivePlatform(
-      duration: const Duration(seconds: 6),
-      positionAt: (_) => const Duration(seconds: 2),
-    );
+    Duration frozen(Duration _) => const Duration(seconds: 30);
     expect(
-      _watch(platform, watch: const Duration(seconds: 9)).opens,
+      _watch(
+        _LivePlatform(positionAt: frozen),
+        watch: const Duration(seconds: 9),
+      ).opens,
       1,
     );
     final r = _watch(
-      _LivePlatform(
-        duration: const Duration(seconds: 6),
-        positionAt: (_) => const Duration(seconds: 2),
-      ),
+      _LivePlatform(positionAt: frozen),
       watch: const Duration(seconds: 15),
     );
     expect(r.opens, 2, reason: 'the stall detector reopened the route');
-    expect(
-      r.events.where((e) => e == MebiusPlayerEventType.buffering).length,
-      2,
-    );
+    expect(_count(r.events, MebiusPlayerEventType.buffering), 2);
+    expect(r.timersLeft, 0);
+  });
+
+  test('a disposed player is never asked for its playhead', () {
+    // Recovery releases a controller every cycle; the sampler must stop with
+    // it rather than poll a released native player.
+    final platform =
+        _LivePlatform(positionAt: (_) => const Duration(seconds: 30));
+    final r = _watch(platform, watch: const Duration(seconds: 40));
+    expect(r.opens, greaterThan(1));
+    expect(platform.callsAfterDispose, 0);
+    expect(r.timersLeft, 0);
   });
 
   test('the first frame is read from the platform playhead', () {
-    // A live item whose duration reads as zero: value.position is clamped to
-    // zero forever, so the old check never saw a frame and walked away.
+    // value.position is clamped to the duration forever, so a check on it
+    // could only ever see 1 ms (or zero) of picture.
     final r = _watch(
-      _LivePlatform(duration: Duration.zero, positionAt: (t) => t),
+      _LivePlatform(
+        duration: Duration.zero,
+        positionAt: (t) => const Duration(seconds: 30) + t,
+      ),
       watch: const Duration(seconds: 3),
     );
     expect(r.clamped, Duration.zero);
     expect(r.opens, 1);
     expect(r.events, contains(MebiusPlayerEventType.playing));
+  });
+
+  group('ForwardProgress', () {
+    test('adds forward steps, ignores backward jumps and unknowns', () {
+      final p = ForwardProgress()
+        ..add(const Duration(seconds: 12))
+        ..add(const Duration(seconds: 13))
+        ..add(null)
+        ..add(const Duration(seconds: 11)) // playlist refresh
+        ..add(const Duration(milliseconds: 11500));
+      expect(p.totalMs, 1500);
+    });
+
+    test('a frozen playhead adds nothing', () {
+      final p = ForwardProgress();
+      for (var i = 0; i < 10; i++) {
+        p.add(const Duration(seconds: 5));
+      }
+      expect(p.totalMs, 0);
+    });
   });
 }

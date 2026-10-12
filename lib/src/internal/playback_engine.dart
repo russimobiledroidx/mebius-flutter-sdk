@@ -196,41 +196,67 @@ class PlaybackCandidate {
   final bool flv;
 }
 
-/// Whether this platform's video player can play the buffered `fast` route.
+/// How far a scale route has got, for the stall detector.
 ///
-/// Android's player (ExoPlayer/media3) ships an FLV extractor and plays a
-/// live HTTP-FLV response as a progressive stream — the same route the web
-/// SDK plays through flv.js, a few seconds behind live instead of the ten-plus
-/// of CDN HLS. iOS has no FLV support at all (AVPlayer), so it keeps `wide`.
-/// How far a scale route has got, for the stall detector; -1 when unknown.
+/// HLS: [forwardMs], the playhead's cumulative forward movement (see
+/// [ForwardProgress]). Never the buffered end as well: the buffer keeps
+/// filling for a while after the decoder freezes, so counting it would hide
+/// exactly the stall this detector is for.
 ///
-/// The playhead — the platform's own, see [livePosition] — except on HTTP-FLV: Android's player reports a live
-/// progressive stream's position as a constant (1 ms on media3 1.9) while the
-/// picture moves, so a playhead-based detector declared every FLV session
-/// stalled ten seconds in and reopened it — a "reconnecting" loop every ~14 s
-/// on a healthy stream. What moves on a live FLV route is the buffered end:
+/// HTTP-FLV: the buffered end. The playhead is useless there: video_player
+/// clamps `value.position` to `value.duration`, and a live stream's duration
+/// (ExoPlayer's TIME_UNSET) overflows to exactly 1 ms in Dart, so the position
+/// read as a constant 1 ms while the picture moved — a "reconnecting" loop
+/// every ~14 s in 0.5.0. What moves on a live FLV route is the buffered end:
 /// media keeps arriving for as long as the route is alive, and stops when it
-/// dies, which is exactly the failure the detector exists to catch. That
-/// constant comes from the platform, so the unclamped [livePosition] does not
-/// help there.
-///
-/// HLS stays on the playhead alone, never the buffered end as well: the
-/// buffer keeps filling for a while after the decoder freezes, so counting it
-/// would hide exactly the stall this detector is for.
+/// dies, which is exactly the failure the detector exists to catch.
 int scaleProgress({
   required bool flv,
-  required Duration? position,
+  required int forwardMs,
   required Duration bufferedEnd,
 }) =>
-    flv ? bufferedEnd.inMilliseconds : (position?.inMilliseconds ?? -1);
+    flv ? bufferedEnd.inMilliseconds : forwardMs;
+
+/// How far a playhead has moved forward in total, in milliseconds.
+///
+/// Monotonic where the playhead is not. Android's player reports a live HLS
+/// position relative to the live window, so it rises and then drops by a
+/// segment on every playlist refresh; a detector that waits for a new high
+/// would call that sawtooth a stall and reopen a healthy stream. Forward steps
+/// are added up and backward jumps only move the mark, so a moving picture
+/// always counts and a frozen one adds nothing. An unreadable sample (null)
+/// is skipped.
+class ForwardProgress {
+  int _total = 0;
+  Duration? _last;
+
+  int get totalMs => _total;
+
+  void add(Duration? position) {
+    if (position == null) {
+      return;
+    }
+    final last = _last;
+    if (last != null && position > last) {
+      _total += (position - last).inMilliseconds;
+    }
+    _last = position;
+  }
+}
+
+/// How often a playing HLS route's playhead is sampled for [ForwardProgress].
+/// Short enough that the step a playlist refresh takes back is never more
+/// than this much of real movement.
+const Duration kPlayheadSampleInterval = Duration(milliseconds: 250);
 
 /// The platform player's playhead, or null when it cannot be read.
 ///
-/// Not `value.position`: video_player clamps that to `value.duration`, and for
-/// iOS live HLS the duration AVPlayer reports is the live window, a few
-/// seconds. `value.position` then freezes there while the picture keeps
-/// moving, which read as a stall and reopened a healthy stream every ~12 s.
-/// The platform's own answer is not clamped.
+/// Not `value.position`: video_player clamps that to `value.duration`, and a
+/// live stream has no real duration — ExoPlayer's TIME_UNSET overflows to
+/// exactly 1 ms in Dart, and AVPlayer's live duration is as small — so
+/// `value.position` stuck at that value while the picture kept moving, which
+/// read as a stall and reopened a healthy iOS stream every ~12 s. The
+/// platform's own answer is not clamped.
 Future<Duration?> livePosition(VideoPlayerController controller) async {
   try {
     return await controller.position;
@@ -246,6 +272,12 @@ Future<bool> _rendering(VideoPlayerController controller) async =>
     controller.value.isInitialized &&
     ((await livePosition(controller)) ?? Duration.zero) > Duration.zero;
 
+/// Whether this platform's video player can play the buffered `fast` route.
+///
+/// Android's player (ExoPlayer/media3) ships an FLV extractor and plays a
+/// live HTTP-FLV response as a progressive stream — the same route the web
+/// SDK plays through flv.js, a few seconds behind live instead of the ten-plus
+/// of CDN HLS. iOS has no FLV support at all (AVPlayer), so it keeps `wide`.
 bool get platformPlaysFlv =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
@@ -488,6 +520,11 @@ class PlaybackEngine {
 
   /// The serving scale route is the buffered `fast` route (HTTP-FLV).
   bool _flv = false;
+
+  /// Forward movement of the serving HLS route's playhead, and the timer that
+  /// samples it. Both belong to one controller and go with it in [_release].
+  ForwardProgress _forward = ForwardProgress();
+  Timer? _sampler;
 
   double _volume = 1;
 
@@ -783,6 +820,28 @@ class PlaybackEngine {
     }
     await controller.setVolume(_volume);
     await controller.play();
+    if (!flv && gen == _gen && _videoController == controller) {
+      _sampleForward(controller);
+    }
+  }
+
+  void _sampleForward(VideoPlayerController controller) {
+    _sampler?.cancel();
+    final forward = _forward = ForwardProgress();
+    var busy = false;
+    _sampler = Timer.periodic(kPlayheadSampleInterval, (_) async {
+      // Never asks a controller that is no longer serving; a slow answer is
+      // not overlapped by the next tick.
+      if (busy || _videoController != controller) {
+        return;
+      }
+      busy = true;
+      final position = await livePosition(controller);
+      busy = false;
+      if (_videoController == controller) {
+        forward.add(position);
+      }
+    });
   }
 
   /// Stops playback and releases resources. Any open still in flight is
@@ -802,6 +861,8 @@ class PlaybackEngine {
     _pc = null;
     _remoteStream = null;
     _videoController = null;
+    _sampler?.cancel();
+    _sampler = null;
     if (resource != null) {
       await signaling.deleteResource(resource);
     }
@@ -880,7 +941,7 @@ class PlaybackEngine {
             : (bufferedEnd - (position ?? v.position)).inMilliseconds,
         'progress': scaleProgress(
           flv: flv,
-          position: position,
+          forwardMs: _forward.totalMs,
           bufferedEnd: bufferedEnd,
         ),
       };
