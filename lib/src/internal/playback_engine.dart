@@ -93,9 +93,11 @@ class HlsProgress {
 /// Runs [initialize] with an upper bound of [limit].
 ///
 /// On timeout the walk gets `connectionFailed` at once and moves to the next
-/// route. The platform open may still finish later, so [dispose] runs when it
-/// settles: a late controller is released, not leaked. On any other failure
-/// [dispose] runs before the error is rethrown.
+/// route, and [dispose] is started without being awaited:
+/// `VideoPlayerController.dispose` waits for the native create step itself and
+/// is idempotent, so a player whose open never completes is still released
+/// rather than left fetching. On any other failure [dispose] runs before the
+/// error is rethrown.
 Future<void> initializeWithin(
   Future<void> Function() initialize,
   Future<void> Function() dispose,
@@ -105,9 +107,7 @@ Future<void> initializeWithin(
   try {
     await init.timeout(limit);
   } on TimeoutException catch (e) {
-    unawaited(
-      init.then<void>((_) {}, onError: (Object _) {}).whenComplete(dispose),
-    );
+    unawaited(dispose());
     throw MebiusError(
       MebiusErrorCode.connectionFailed,
       'The stream did not start in time.',
@@ -463,6 +463,12 @@ class PlaybackEngine {
 
   double _volume = 1;
 
+  /// Builds the platform player for a scale route. Replaced in tests.
+  @visibleForTesting
+  VideoPlayerController Function(Uri url, VideoFormat? formatHint)
+      createController = (url, formatHint) =>
+          VideoPlayerController.networkUrl(url, formatHint: formatHint);
+
   /// Bumped by [stop]. An open captures it when it begins and publishes into
   /// the fields above only while it is unchanged, so an open that outlives a
   /// [stop] — a quality reopen still in flight when the viewer switched
@@ -710,17 +716,22 @@ class PlaybackEngine {
     // playlist as a progressive file and fails with UnrecognizedInputFormat.
     // FLV is exactly that progressive case, so it gets no hint and the player
     // sniffs the container.
-    final controller = VideoPlayerController.networkUrl(
-      Uri.parse(url),
-      formatHint: flv ? null : VideoFormat.hls,
-    );
+    final controller =
+        createController(Uri.parse(url), flv ? null : VideoFormat.hls);
     // Published: from here a stop() disposes it.
     _videoController = controller;
     _flv = flv;
     try {
       await initializeWithin(
         controller.initialize,
-        controller.dispose,
+        // Unpublished first, so nothing (MebiusView, readStats, a concurrent
+        // stop) reaches a controller that is being disposed.
+        () {
+          if (_videoController == controller) {
+            _videoController = null;
+          }
+          return controller.dispose();
+        },
         flv ? kFlvInitializeTimeout : kHlsInitializeTimeout,
       );
     } catch (e) {

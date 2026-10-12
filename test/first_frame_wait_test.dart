@@ -169,40 +169,49 @@ void main() {
   });
 
   group('initializeWithin', () {
-    test('times out with connectionFailed; a late open is then disposed', () {
-      fakeAsync((async) {
-        final init = Completer<void>();
-        var disposed = 0;
-        Object? error;
-        unawaited(
-          initializeWithin(
-            () => init.future,
-            () async => disposed += 1,
-            kHlsInitializeTimeout,
-          ).then<void>(
-            (_) {},
-            onError: (Object e) {
-              error = e;
-            },
-          ),
-        );
-        async.elapse(const Duration(seconds: 19));
-        expect(error, isNull);
-        async.elapse(const Duration(seconds: 1));
-        expect(
-          error,
-          isA<MebiusError>().having(
-            (e) => e.code,
-            'code',
-            MebiusErrorCode.connectionFailed,
-          ),
-        );
-        expect(disposed, 0, reason: 'disposing mid-open would wait on it');
-        init.complete();
-        async.flushMicrotasks();
-        expect(disposed, 1, reason: 'the late controller must not leak');
+    for (final completes in [true, false]) {
+      test(
+          'times out with connectionFailed and disposes at once '
+          '(open ${completes ? 'completes late' : 'never completes'})', () {
+        fakeAsync((async) {
+          final init = Completer<void>();
+          var disposed = 0;
+          Object? error;
+          unawaited(
+            initializeWithin(
+              () => init.future,
+              () async => disposed += 1,
+              kHlsInitializeTimeout,
+            ).then<void>(
+              (_) {},
+              onError: (Object e) {
+                error = e;
+              },
+            ),
+          );
+          async.elapse(const Duration(seconds: 19));
+          expect(error, isNull);
+          expect(disposed, 0);
+          async.elapse(const Duration(seconds: 1));
+          expect(
+            error,
+            isA<MebiusError>().having(
+              (e) => e.code,
+              'code',
+              MebiusErrorCode.connectionFailed,
+            ),
+          );
+          // Not waiting for the open: one that never completes must still be
+          // released (the real dispose waits for the native create step).
+          expect(disposed, 1);
+          if (completes) {
+            init.complete();
+          }
+          async.elapse(const Duration(seconds: 60));
+          expect(disposed, 1, reason: 'disposed exactly once');
+        });
       });
-    });
+    }
 
     test('an initialize that throws is disposed and rethrown at once', () {
       fakeAsync((async) {

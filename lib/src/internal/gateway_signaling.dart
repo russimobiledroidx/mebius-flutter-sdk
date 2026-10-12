@@ -128,25 +128,70 @@ class GatewaySignaling {
   }
 
   Future<SdpExchangeResult> _sdpExchange(String url, String offerSdp) async {
-    http.Response response;
-    final sent = _http.post(
-      Uri.parse(url),
-      headers: {
-        ..._authHeaders,
-        'Content-Type': 'application/sdp',
-      },
+    final response = await _send(
+      'POST',
+      url,
+      headers: {'Content-Type': 'application/sdp'},
       body: offerSdp,
-    );
-    try {
-      response = await sent.timeout(kGatewayRequestTimeout);
-    } on TimeoutException catch (e) {
+      read: http.Response.fromStream,
       // A late answer still created a session on the gateway; release it.
+      onLate: (late) {
+        final location = late.headers['location'];
+        if (location != null) {
+          unawaited(deleteResource(_resolve(location)));
+        }
+      },
+    );
+    _throwForStatus(response.statusCode);
+    final location = response.headers['location'];
+    return SdpExchangeResult(
+      answerSdp: response.body,
+      resourceUrl: location == null ? null : _resolve(location),
+    );
+  }
+
+  /// One gateway request on the open path, bounded by
+  /// [kGatewayRequestTimeout] including [read] of its response.
+  ///
+  /// On timeout the request is aborted, so the socket closes, and the caller
+  /// gets `connectionFailed`. If the response had already arrived, [onLate]
+  /// sees it and its body is cancelled. Any failure to build or send the
+  /// request, a malformed URL included, is `connectionFailed` too.
+  Future<T> _send<T>(
+    String method,
+    String url, {
+    required Future<T> Function(http.StreamedResponse) read,
+    Map<String, String> headers = const {},
+    String? body,
+    void Function(http.StreamedResponse late)? onLate,
+  }) async {
+    final abort = Completer<void>();
+    Future<http.StreamedResponse>? sent;
+    try {
+      final request = http.AbortableRequest(
+        method,
+        Uri.parse(url),
+        abortTrigger: abort.future,
+      )
+        ..headers.addAll(_authHeaders)
+        ..headers.addAll(headers);
+      if (body != null) {
+        request.body = body;
+      }
+      sent = _http.send(request);
+      return await sent.then(read).timeout(kGatewayRequestTimeout);
+    } on TimeoutException catch (e) {
+      abort.complete();
       unawaited(
-        sent.then<void>(
+        sent!.then<void>(
           (late) {
-            final location = late.headers['location'];
-            if (location != null) {
-              unawaited(deleteResource(_resolve(location)));
+            onLate?.call(late);
+            // The abort closes it on clients that support aborting; this
+            // closes it on the rest. [read] may already be listening.
+            try {
+              unawaited(late.stream.listen(null, onError: (_) {}).cancel());
+            } on Object catch (_) {
+              // Already listened to by [read]; the abort covers it.
             }
           },
           onError: (Object _) {},
@@ -164,12 +209,6 @@ class GatewaySignaling {
         cause: e,
       );
     }
-    _throwForStatus(response.statusCode);
-    final location = response.headers['location'];
-    return SdpExchangeResult(
-      answerSdp: response.body,
-      resourceUrl: location == null ? null : _resolve(location),
-    );
   }
 
   /// Tears down a previously created session resource.
@@ -183,39 +222,18 @@ class GatewaySignaling {
 
   /// Verifies that the configured stream playlist is reachable for scale mode.
   Future<void> ensureScaleReachable(String streamId, [String? url]) async {
-    http.StreamedResponse response;
-    final request =
-        http.Request('GET', Uri.parse(url ?? scalePlaylistUrl(streamId)))
-          ..headers.addAll(_authHeaders);
-    final sent = _http.send(request);
-    try {
-      response = await sent.timeout(kGatewayRequestTimeout);
-    } on TimeoutException catch (e) {
-      // A late answer would hold its connection open (a live FLV body never
-      // ends); close it when it arrives.
-      unawaited(
-        sent.then<void>(
-          (late) => late.stream.listen(null, onError: (_) {}).cancel(),
-          onError: (Object _) {},
-        ),
-      );
-      throw MebiusError(
-        MebiusErrorCode.connectionFailed,
-        'The Mebius gateway did not answer in time.',
-        cause: e,
-      );
-    } catch (e) {
-      throw MebiusError(
-        MebiusErrorCode.connectionFailed,
-        'Could not reach the Mebius gateway.',
-        cause: e,
-      );
-    }
-    // Only the status line matters. A live FLV route never ends its body, so
-    // reading it (as a plain GET does) would hang the probe forever; cancelling
-    // the body closes the connection after the headers.
-    unawaited(response.stream.listen(null, onError: (_) {}).cancel());
-    _throwForStatus(response.statusCode);
+    final status = await _send(
+      'GET',
+      url ?? scalePlaylistUrl(streamId),
+      // Only the status line matters. A live FLV route never ends its body,
+      // so reading it (as a plain GET does) would hang the probe forever;
+      // cancelling the body closes the connection after the headers.
+      read: (response) async {
+        unawaited(response.stream.listen(null, onError: (_) {}).cancel());
+        return response.statusCode;
+      },
+    );
+    _throwForStatus(status);
   }
 
   String _resolve(String location) {

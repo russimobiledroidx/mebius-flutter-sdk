@@ -10,12 +10,15 @@
   5 s: AVPlayer does not report buffering before the first frame, and a live
   playlist's buffer grows one segment at a time. A player error abandons the
   route at once. FLV and WebRTC keep 8 s, unchanged.
-- Nothing on the open path can hang forever any more. The route probe and the
-  real-time SDP exchange give up after 15 s, the HLS player's `initialize()`
-  after 20 s, and the FLV player's after 15 s; each then moves on to the next
-  route. A late answer is cleaned up when it arrives: the probe's connection is
-  closed, a real-time session is deleted, and a player that finishes opening
-  is disposed.
+- Nothing on the open path can hang forever any more. Gateway requests —
+  the route probe, and the SDP exchange for both watching (WHEP) and
+  broadcasting (WHIP, `MebiusBroadcaster.start`) — give up after 15 s and are
+  aborted, closing the socket. The HLS player's `initialize()` gives up after
+  20 s and the FLV player's after 15 s, and the player is disposed at once,
+  even if its open never completes. Each then moves on to the next route. An
+  answer that still arrives late is cleaned up: the probe's connection is
+  closed and a session the gateway created is deleted. A malformed gateway
+  URL now reports `CONNECTION_FAILED` instead of `UNKNOWN`.
 
 ## 0.6.0
 
