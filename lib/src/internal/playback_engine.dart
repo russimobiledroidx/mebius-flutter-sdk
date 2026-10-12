@@ -10,6 +10,8 @@
 // Internal implementation detail; not part of the documented public surface.
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -50,6 +52,72 @@ const Duration kHlsFirstFrameTimeout = Duration(seconds: 20);
 /// How long an HLS route that is still visibly loading may run past
 /// [kHlsFirstFrameTimeout] before it is abandoned anyway.
 const Duration kHlsFirstFrameHardCap = Duration(seconds: 30);
+
+/// How long after the buffered end last moved an HLS route still counts as
+/// loading. A live playlist's buffer grows one 3–4 s segment at a time, so
+/// "grew since the last 200 ms poll" is false most of the time even on a
+/// route that is loading fine.
+const Duration kHlsProgressWindow = Duration(seconds: 5);
+
+/// Upper bound on the platform player's `initialize()` for an HLS route. An
+/// AVPlayer item stuck in "unknown" never completes it, and nothing else
+/// would move the viewer on.
+const Duration kHlsInitializeTimeout = Duration(seconds: 20);
+
+/// Upper bound on `initialize()` for the FLV route, which opens in about half
+/// a second when it works.
+const Duration kFlvInitializeTimeout = Duration(seconds: 15);
+
+/// Whether an HLS route that has not shown a frame yet is still loading.
+///
+/// AVPlayer reports `isBuffering` only on change, so before the first frame
+/// it usually stays false; the buffered end is the signal that moves. It is
+/// remembered with the time it last grew, so a route counts as loading for
+/// [kHlsProgressWindow] after each segment arrives.
+class HlsProgress {
+  Duration _end = Duration.zero;
+  DateTime? _grewAt;
+
+  bool progressing({required bool isBuffering, required Duration bufferedEnd}) {
+    final now = clock.now();
+    if (bufferedEnd > _end) {
+      _end = bufferedEnd;
+      _grewAt = now;
+    }
+    final grewAt = _grewAt;
+    return isBuffering ||
+        (grewAt != null && now.difference(grewAt) <= kHlsProgressWindow);
+  }
+}
+
+/// Runs [initialize] with an upper bound of [limit].
+///
+/// On timeout the walk gets `connectionFailed` at once and moves to the next
+/// route. The platform open may still finish later, so [dispose] runs when it
+/// settles: a late controller is released, not leaked. On any other failure
+/// [dispose] runs before the error is rethrown.
+Future<void> initializeWithin(
+  Future<void> Function() initialize,
+  Future<void> Function() dispose,
+  Duration limit,
+) async {
+  final init = initialize();
+  try {
+    await init.timeout(limit);
+  } on TimeoutException catch (e) {
+    unawaited(
+      init.then<void>((_) {}, onError: (Object _) {}).whenComplete(dispose),
+    );
+    throw MebiusError(
+      MebiusErrorCode.connectionFailed,
+      'The stream did not start in time.',
+      cause: e,
+    );
+  } on Object {
+    await dispose();
+    rethrow;
+  }
+}
 
 /// What one poll of a route that is still opening saw.
 enum FrameProbe {
@@ -516,7 +584,7 @@ class PlaybackEngine {
       case PlaybackPipeline.scale:
         await _startScale(streamId, candidate.path, gen, flv: candidate.flv);
     }
-    var lastBufferedEnd = Duration.zero;
+    final progress = HlsProgress();
     return awaitFirstFrame(
       // Never reads a newer session's frame as this open's.
       current: () => gen == _gen,
@@ -533,14 +601,14 @@ class PlaybackEngine {
         if (v.isInitialized && v.position > Duration.zero) {
           return FrameProbe.frame;
         }
-        // Progress is buffering or the buffered end moving, not
+        // Progress is buffering or the buffered end moving recently, not
         // "initialized": every route that reaches this wait is initialized,
         // stuck ones included.
-        final end =
-            v.buffered.isEmpty ? Duration.zero : v.buffered.last.end;
-        final grew = end > lastBufferedEnd;
-        lastBufferedEnd = end;
-        return v.isBuffering || grew
+        return progress.progressing(
+          isBuffering: v.isBuffering,
+          bufferedEnd:
+              v.buffered.isEmpty ? Duration.zero : v.buffered.last.end,
+        )
             ? FrameProbe.progressing
             : FrameProbe.waiting;
       },
@@ -650,20 +718,26 @@ class PlaybackEngine {
     _videoController = controller;
     _flv = flv;
     try {
-      await controller.initialize();
+      await initializeWithin(
+        controller.initialize,
+        controller.dispose,
+        flv ? kFlvInitializeTimeout : kHlsInitializeTimeout,
+      );
     } catch (e) {
+      // initializeWithin has disposed it, or will once a late open settles.
       if (_videoController == controller) {
         _videoController = null;
       }
-      await controller.dispose();
       if (gen != _gen) {
         throw _stopped;
       }
-      throw MebiusError(
-        MebiusErrorCode.connectionFailed,
-        'Playback could not be started for this stream.',
-        cause: e,
-      );
+      throw e is MebiusError
+          ? e
+          : MebiusError(
+              MebiusErrorCode.connectionFailed,
+              'Playback could not be started for this stream.',
+              cause: e,
+            );
     }
     if (gen != _gen) {
       // stop() already disposed it.

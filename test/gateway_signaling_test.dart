@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -97,6 +98,82 @@ void main() {
       await sig.playOffer('s_xyz', 'offer');
       expect(captured.toString(),
           'https://engine.example/whep/s_xyz?token=playTOKEN',);
+    });
+  });
+
+  group('GatewaySignaling open-path bounds', () {
+    test('a route probe nobody answers fails at 15 s; a late answer is closed',
+        () {
+      fakeAsync((async) {
+        final answer = Completer<http.StreamedResponse>();
+        final body = StreamController<List<int>>();
+        var cancelled = false;
+        body.onCancel = () => cancelled = true;
+        final sig = GatewaySignaling(
+          gateway: 'https://engine.example',
+          token: 'tok',
+          httpClient: MockClient.streaming((req, _) => answer.future),
+        );
+        Object? error;
+        unawaited(
+sig.ensureScaleReachable('s', 'https://engine.example/d/wide/s').then<void>(
+              (_) {},
+              onError: (Object e) {
+                error = e;
+              },
+            ),
+        );
+        async.elapse(const Duration(seconds: 14));
+        expect(error, isNull);
+        async.elapse(const Duration(seconds: 1));
+        expect(
+          error,
+          isA<MebiusError>().having(
+            (e) => e.code,
+            'code',
+            MebiusErrorCode.connectionFailed,
+          ),
+        );
+        answer.complete(http.StreamedResponse(body.stream, 200));
+        async.flushMicrotasks();
+        expect(cancelled, isTrue, reason: 'late connection must be closed');
+        unawaited(body.close());
+      });
+    });
+
+    test('an SDP exchange nobody answers fails at 15 s; a late session is '
+        'deleted', () {
+      fakeAsync((async) {
+        final answer = Completer<http.Response>();
+        final deleted = <Uri>[];
+        final sig = GatewaySignaling(
+          gateway: 'https://engine.example',
+          token: 'tok',
+          httpClient: MockClient((req) {
+            if (req.method == 'DELETE') {
+              deleted.add(req.url);
+              return Future.value(http.Response('', 200));
+            }
+            return answer.future;
+          }),
+        );
+        Object? error;
+        unawaited(
+sig.playOffer('s', 'offer').then<void>(
+              (_) {},
+              onError: (Object e) {
+                error = e;
+              },
+            ),
+        );
+        async.elapse(const Duration(seconds: 15));
+        expect(error, isA<MebiusError>());
+        answer.complete(
+          http.Response('answer', 201, headers: {'location': '/whep/s/r1'}),
+        );
+        async.flushMicrotasks();
+        expect(deleted.map((u) => u.path), ['/whep/s/r1']);
+      });
     });
   });
 }

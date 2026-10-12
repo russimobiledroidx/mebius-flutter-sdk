@@ -37,6 +37,14 @@ class SdpExchangeResult {
   final String? resourceUrl;
 }
 
+/// Upper bound on one gateway request on the open path: the route probe and
+/// the real-time SDP exchange.
+///
+/// Without it an edge that accepts the connection and never answers held the
+/// viewer on "connecting" forever: no error, so no next route. 15 s is well
+/// past a cold edge's slowest observed answer (~6 s).
+const Duration kGatewayRequestTimeout = Duration(seconds: 15);
+
 /// Thin HTTP signaling client that talks to the Mebius gateway.
 ///
 /// Translates raw transport responses into [MebiusError]s using Mebius
@@ -121,14 +129,33 @@ class GatewaySignaling {
 
   Future<SdpExchangeResult> _sdpExchange(String url, String offerSdp) async {
     http.Response response;
+    final sent = _http.post(
+      Uri.parse(url),
+      headers: {
+        ..._authHeaders,
+        'Content-Type': 'application/sdp',
+      },
+      body: offerSdp,
+    );
     try {
-      response = await _http.post(
-        Uri.parse(url),
-        headers: {
-          ..._authHeaders,
-          'Content-Type': 'application/sdp',
-        },
-        body: offerSdp,
+      response = await sent.timeout(kGatewayRequestTimeout);
+    } on TimeoutException catch (e) {
+      // A late answer still created a session on the gateway; release it.
+      unawaited(
+        sent.then<void>(
+          (late) {
+            final location = late.headers['location'];
+            if (location != null) {
+              unawaited(deleteResource(_resolve(location)));
+            }
+          },
+          onError: (Object _) {},
+        ),
+      );
+      throw MebiusError(
+        MebiusErrorCode.connectionFailed,
+        'The Mebius gateway did not answer in time.',
+        cause: e,
       );
     } catch (e) {
       throw MebiusError(
@@ -157,11 +184,26 @@ class GatewaySignaling {
   /// Verifies that the configured stream playlist is reachable for scale mode.
   Future<void> ensureScaleReachable(String streamId, [String? url]) async {
     http.StreamedResponse response;
+    final request =
+        http.Request('GET', Uri.parse(url ?? scalePlaylistUrl(streamId)))
+          ..headers.addAll(_authHeaders);
+    final sent = _http.send(request);
     try {
-      final request =
-          http.Request('GET', Uri.parse(url ?? scalePlaylistUrl(streamId)))
-            ..headers.addAll(_authHeaders);
-      response = await _http.send(request);
+      response = await sent.timeout(kGatewayRequestTimeout);
+    } on TimeoutException catch (e) {
+      // A late answer would hold its connection open (a live FLV body never
+      // ends); close it when it arrives.
+      unawaited(
+        sent.then<void>(
+          (late) => late.stream.listen(null, onError: (_) {}).cancel(),
+          onError: (Object _) {},
+        ),
+      );
+      throw MebiusError(
+        MebiusErrorCode.connectionFailed,
+        'The Mebius gateway did not answer in time.',
+        cause: e,
+      );
     } catch (e) {
       throw MebiusError(
         MebiusErrorCode.connectionFailed,

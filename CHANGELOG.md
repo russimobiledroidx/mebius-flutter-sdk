@@ -5,9 +5,17 @@
   per playlist on the first request and AVPlayer then buffers a few 3–4 s
   segments, so healthy HLS routes were abandoned and the next route started
   again from zero. HLS routes (`wide`, `local`, origin) now get 20 s, and past
-  that keep going while media is visibly arriving (buffering, or the buffered
-  range growing), up to 30 s. A player error abandons the route at once.
-  FLV and WebRTC keep 8 s, unchanged.
+  that keep going while media is still arriving, up to 30 s. "Still arriving"
+  means the player is buffering or the buffered range grew within the last
+  5 s: AVPlayer does not report buffering before the first frame, and a live
+  playlist's buffer grows one segment at a time. A player error abandons the
+  route at once. FLV and WebRTC keep 8 s, unchanged.
+- Nothing on the open path can hang forever any more. The route probe and the
+  real-time SDP exchange give up after 15 s, the HLS player's `initialize()`
+  after 20 s, and the FLV player's after 15 s; each then moves on to the next
+  route. A late answer is cleaned up when it arrives: the probe's connection is
+  closed, a real-time session is deleted, and a player that finishes opening
+  is disposed.
 
 ## 0.6.0
 

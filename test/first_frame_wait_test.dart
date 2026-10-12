@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:clock/clock.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mebius/mebius.dart';
 import 'package:mebius/src/internal/playback_engine.dart';
 
 /// Runs [awaitFirstFrame] on a fake clock and reports what it decided and
@@ -109,5 +110,137 @@ void main() {
     );
     expect(r.result, isFalse);
     expect(r.at, lessThan(const Duration(milliseconds: 15500)));
+  });
+
+  group('HLS progress on iOS', () {
+    // AVPlayer keeps isBuffering false before the first frame, and a live
+    // playlist's buffered end grows one segment (~3 s) at a time.
+    FrameProbe Function(Duration) segments({
+      required Duration frameAt,
+      Duration stallAt = const Duration(hours: 1),
+    }) {
+      final progress = HlsProgress();
+      return (t) {
+        if (t >= frameAt) {
+          return FrameProbe.frame;
+        }
+        final grown = (t < stallAt ? t : stallAt).inSeconds ~/ 3 * 3;
+        return progress.progressing(
+          isBuffering: false,
+          bufferedEnd: Duration(seconds: grown),
+        )
+            ? FrameProbe.progressing
+            : FrameProbe.waiting;
+      };
+    }
+
+    test('buffered grows every 3 s, first frame at 24 s: kept', () {
+      final r = _run(
+        hls: true,
+        script: segments(frameAt: const Duration(seconds: 24)),
+      );
+      expect(r.result, isTrue);
+      expect(r.at, greaterThanOrEqualTo(const Duration(seconds: 24)));
+    });
+
+    test('buffer that stopped growing at 9 s is abandoned at 20 s', () {
+      final r = _run(
+        hls: true,
+        script: segments(
+          frameAt: const Duration(seconds: 28),
+          stallAt: const Duration(seconds: 9),
+        ),
+      );
+      expect(r.result, isFalse);
+      expect(r.at, lessThan(const Duration(seconds: 21)));
+    });
+
+    test('isBuffering alone counts as progress', () {
+      final p = HlsProgress();
+      expect(
+        p.progressing(isBuffering: true, bufferedEnd: Duration.zero),
+        isTrue,
+      );
+      expect(
+        p.progressing(isBuffering: false, bufferedEnd: Duration.zero),
+        isFalse,
+      );
+    });
+  });
+
+  group('initializeWithin', () {
+    test('times out with connectionFailed; a late open is then disposed', () {
+      fakeAsync((async) {
+        final init = Completer<void>();
+        var disposed = 0;
+        Object? error;
+        unawaited(
+          initializeWithin(
+            () => init.future,
+            () async => disposed += 1,
+            kHlsInitializeTimeout,
+          ).then<void>(
+            (_) {},
+            onError: (Object e) {
+              error = e;
+            },
+          ),
+        );
+        async.elapse(const Duration(seconds: 19));
+        expect(error, isNull);
+        async.elapse(const Duration(seconds: 1));
+        expect(
+          error,
+          isA<MebiusError>().having(
+            (e) => e.code,
+            'code',
+            MebiusErrorCode.connectionFailed,
+          ),
+        );
+        expect(disposed, 0, reason: 'disposing mid-open would wait on it');
+        init.complete();
+        async.flushMicrotasks();
+        expect(disposed, 1, reason: 'the late controller must not leak');
+      });
+    });
+
+    test('an initialize that throws is disposed and rethrown at once', () {
+      fakeAsync((async) {
+        var disposed = 0;
+        Object? error;
+        unawaited(
+          initializeWithin(
+            () => Future<void>.error(StateError('bad')),
+            () async => disposed += 1,
+            kHlsInitializeTimeout,
+          ).then<void>(
+            (_) {},
+            onError: (Object e) {
+              error = e;
+            },
+          ),
+        );
+        async.flushMicrotasks();
+        expect(error, isA<StateError>());
+        expect(disposed, 1);
+      });
+    });
+
+    test('a timely initialize is left alone', () {
+      fakeAsync((async) {
+        var disposed = 0;
+        var done = false;
+        unawaited(
+          initializeWithin(
+            () => Future<void>.delayed(const Duration(seconds: 3)),
+            () async => disposed += 1,
+            kFlvInitializeTimeout,
+          ).then<void>((_) => done = true),
+        );
+        async.elapse(const Duration(seconds: 30));
+        expect(done, isTrue);
+        expect(disposed, 0);
+      });
+    });
   });
 }
