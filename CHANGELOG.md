@@ -1,3 +1,16 @@
+## 0.6.2
+
+- iOS live HLS reconnected every ~12 s because video_player clamps position to
+  the live duration. For a live stream AVPlayer reports the live window (a few
+  seconds) as the duration, so `VideoPlayerController.value.position` froze
+  there while the picture kept playing; the stall detector, which watches the
+  playhead, declared the route dead ten seconds later and reopened it. The
+  first-frame check and the stall detector now read the platform's own,
+  unclamped playhead (`VideoPlayerController.position`). An unreadable
+  playhead counts as unknown, not as progress. HLS stall detection stays on
+  the playhead alone, so a frozen decoder is still caught even while its
+  buffer keeps filling; FLV keeps watching the buffered end, as in 0.5.1.
+
 ## 0.6.1
 
 - iPhone viewers no longer get stuck on "connecting" on CDN (HLS) streams.

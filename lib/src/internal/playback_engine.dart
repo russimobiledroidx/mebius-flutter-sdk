@@ -202,21 +202,49 @@ class PlaybackCandidate {
 /// live HTTP-FLV response as a progressive stream — the same route the web
 /// SDK plays through flv.js, a few seconds behind live instead of the ten-plus
 /// of CDN HLS. iOS has no FLV support at all (AVPlayer), so it keeps `wide`.
-/// How far a scale route has got, for the stall detector.
+/// How far a scale route has got, for the stall detector; -1 when unknown.
 ///
-/// The playhead, except on HTTP-FLV: Android's player reports a live
+/// The playhead — the platform's own, see [livePosition] — except on HTTP-FLV: Android's player reports a live
 /// progressive stream's position as a constant (1 ms on media3 1.9) while the
 /// picture moves, so a playhead-based detector declared every FLV session
 /// stalled ten seconds in and reopened it — a "reconnecting" loop every ~14 s
 /// on a healthy stream. What moves on a live FLV route is the buffered end:
 /// media keeps arriving for as long as the route is alive, and stops when it
-/// dies, which is exactly the failure the detector exists to catch.
+/// dies, which is exactly the failure the detector exists to catch. That
+/// constant comes from the platform, so the unclamped [livePosition] does not
+/// help there.
+///
+/// HLS stays on the playhead alone, never the buffered end as well: the
+/// buffer keeps filling for a while after the decoder freezes, so counting it
+/// would hide exactly the stall this detector is for.
 int scaleProgress({
   required bool flv,
-  required Duration position,
+  required Duration? position,
   required Duration bufferedEnd,
 }) =>
-    (flv ? bufferedEnd : position).inMilliseconds;
+    flv ? bufferedEnd.inMilliseconds : (position?.inMilliseconds ?? -1);
+
+/// The platform player's playhead, or null when it cannot be read.
+///
+/// Not `value.position`: video_player clamps that to `value.duration`, and for
+/// iOS live HLS the duration AVPlayer reports is the live window, a few
+/// seconds. `value.position` then freezes there while the picture keeps
+/// moving, which read as a stall and reopened a healthy stream every ~12 s.
+/// The platform's own answer is not clamped.
+Future<Duration?> livePosition(VideoPlayerController controller) async {
+  try {
+    return await controller.position;
+  } on Object catch (_) {
+    // Disposed or mid-teardown: unknown, not zero.
+    return null;
+  }
+}
+
+/// Whether [controller] has rendered: initialized and the platform playhead
+/// past zero.
+Future<bool> _rendering(VideoPlayerController controller) async =>
+    controller.value.isInitialized &&
+    ((await livePosition(controller)) ?? Duration.zero) > Duration.zero;
 
 bool get platformPlaysFlv =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -604,7 +632,7 @@ class PlaybackEngine {
         if (v.hasError) {
           return FrameProbe.failed;
         }
-        if (v.isInitialized && v.position > Duration.zero) {
+        if (await _rendering(controller)) {
           return FrameProbe.frame;
         }
         // Progress is buffering or the buffered end moving recently, not
@@ -628,8 +656,7 @@ class PlaybackEngine {
   Future<bool> _hasFrame() async {
     final controller = _videoController;
     if (controller != null) {
-      final v = controller.value;
-      return v.isInitialized && v.position > Duration.zero;
+      return _rendering(controller);
     }
     // For the WebRTC route, ask the decoder. A track object is not evidence: it
     // exists from the moment the session is negotiated, so reading it as "a
@@ -840,21 +867,21 @@ class PlaybackEngine {
     }
     final controller = _videoController;
     if (controller != null && controller.value.isInitialized) {
-      var buffered = 0;
-      if (controller.value.buffered.isNotEmpty) {
-        buffered = controller.value.buffered.last.end.inMilliseconds -
-            controller.value.position.inMilliseconds;
-      }
+      final flv = _flv;
+      final position = await livePosition(controller);
+      final v = controller.value;
+      final bufferedEnd =
+          v.buffered.isEmpty ? Duration.zero : v.buffered.last.end;
       return {
         'bitrate': 0,
         'fps': 0,
-        'buffered': buffered,
+        'buffered': v.buffered.isEmpty
+            ? 0
+            : (bufferedEnd - (position ?? v.position)).inMilliseconds,
         'progress': scaleProgress(
-          flv: _flv,
-          position: controller.value.position,
-          bufferedEnd: controller.value.buffered.isEmpty
-              ? Duration.zero
-              : controller.value.buffered.last.end,
+          flv: flv,
+          position: position,
+          bufferedEnd: bufferedEnd,
         ),
       };
     }

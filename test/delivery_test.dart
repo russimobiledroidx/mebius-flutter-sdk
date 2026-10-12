@@ -110,6 +110,12 @@ void main() {
         scaleProgress(flv: false, position: const Duration(seconds: 3), bufferedEnd: const Duration(seconds: 9)),
         3000,
       );
+      // An unreadable HLS playhead is unknown, never the buffered end: a
+      // growing buffer behind a frozen decoder must still read as a stall.
+      expect(
+        scaleProgress(flv: false, position: null, bufferedEnd: const Duration(seconds: 9)),
+        -1,
+      );
     });
 
     test('FLV is an Android-only capability', () {
