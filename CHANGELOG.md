@@ -1,3 +1,22 @@
+## 0.6.2
+
+- iOS live HLS reconnected every ~12 s because video_player clamps position to
+  the live duration. A live stream has no real duration — ExoPlayer's
+  TIME_UNSET overflows to exactly 1 ms in Dart, and AVPlayer's reads as small
+  — so `VideoPlayerController.value.position` stuck at that value while the
+  picture kept playing, and the stall detector, which watched the playhead,
+  declared the route dead ten seconds later and reopened it. The first-frame
+  check and the stall detector now read the platform's own, unclamped
+  playhead (`VideoPlayerController.position`).
+- Android live HLS no longer reopens healthy streams either. ExoPlayer reports
+  the playhead relative to the live window, so it rises and then drops back a
+  segment on every playlist refresh, and a detector waiting for a new high
+  read that sawtooth as a stall. HLS routes now sample the platform playhead
+  every 250 ms and count only its forward movement, which grows while the
+  picture moves and stops when it freezes. HLS stall detection still never
+  counts the buffered end, so a frozen decoder behind a filling buffer is
+  caught. FLV keeps watching the buffered end, as in 0.5.1.
+
 ## 0.6.1
 
 - iPhone viewers no longer get stuck on "connecting" on CDN (HLS) streams.
@@ -51,8 +70,9 @@
 ## 0.5.1
 
 - Android no longer reopens a healthy `fast` (HTTP-FLV) route every ~14 s.
-  media3 reports a live progressive stream's playhead as a constant (1 ms)
-  while the picture moves, so the stall detector — which watched the playhead
+  video_player reports a live progressive stream's playhead as a constant
+  1 ms while the picture moves (it clamps the position to the live duration,
+  which overflows to 1 ms — see 0.6.2), so the stall detector — which watched the playhead
   — declared every FLV session frozen ten seconds in and reopened it, and the
   viewer saw "reconnecting" on a fast connection. On FLV the detector now
   watches the buffered end, which moves while media arrives and stops when the
