@@ -1,3 +1,14 @@
+## 0.6.1
+
+- iPhone viewers no longer get stuck on "connecting" on CDN (HLS) streams.
+  Every route had 8 s to show a first frame, but a cold CDN edge takes 5–6 s
+  per playlist on the first request and AVPlayer then buffers a few 3–4 s
+  segments, so healthy HLS routes were abandoned and the next route started
+  again from zero. HLS routes (`wide`, `local`, origin) now get 20 s, and past
+  that keep going while media is visibly arriving (buffering, or the buffered
+  range growing), up to 30 s. A player error abandons the route at once.
+  FLV and WebRTC keep 8 s, unchanged.
+
 ## 0.6.0
 
 - Quality selection for streams with a rendition ladder (1080p/720p/540p/480p

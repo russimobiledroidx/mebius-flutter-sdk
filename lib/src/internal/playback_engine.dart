@@ -10,6 +10,7 @@
 // Internal implementation detail; not part of the documented public surface.
 // ignore_for_file: public_member_api_docs
 
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
@@ -33,7 +34,74 @@ enum PlaybackPipeline {
 /// ingest yet answers 200 with an empty stream, and a WebRTC connection reports
 /// `connected` while zero frames arrive. 8s survives a slow first segment on
 /// mobile data and is short enough that the viewer has not left yet.
+///
+/// This is the budget for FLV and WebRTC, which show a picture in about half a
+/// second when they work. HLS gets [kHlsFirstFrameTimeout].
 const Duration kFirstFrameTimeout = Duration(seconds: 8);
+
+/// First-frame budget for an HLS route (`wide`, `local`, origin playlist).
+///
+/// A cold CDN edge answers the master and media playlists in 5–6 s each on the
+/// first request, and AVPlayer then buffers a few 3–4 s segments before it
+/// moves the playhead. 8 s abandoned healthy routes on iPhone, and each
+/// abandoned route restarts the next one from zero: a "connecting" loop.
+const Duration kHlsFirstFrameTimeout = Duration(seconds: 20);
+
+/// How long an HLS route that is still visibly loading may run past
+/// [kHlsFirstFrameTimeout] before it is abandoned anyway.
+const Duration kHlsFirstFrameHardCap = Duration(seconds: 30);
+
+/// What one poll of a route that is still opening saw.
+enum FrameProbe {
+  /// The picture is moving.
+  frame,
+
+  /// No picture yet, but media is still arriving.
+  progressing,
+
+  /// No picture and no sign of progress.
+  waiting,
+
+  /// The player reported an error; this route will not recover by waiting.
+  failed,
+}
+
+/// Polls [probe] until a first frame, and decides when to give up.
+///
+/// FLV and WebRTC ([hls] false) keep the plain [kFirstFrameTimeout] and
+/// ignore everything but `frame`, exactly as before. HLS gets
+/// [kHlsFirstFrameTimeout], is abandoned at once on `failed`, and past that
+/// budget keeps going while the probe reports `progressing` — up to
+/// [kHlsFirstFrameHardCap]. [current] is the engine's generation check: once
+/// it is false the open was retired, and nothing it reads counts.
+Future<bool> awaitFirstFrame({
+  required Future<FrameProbe> Function() probe,
+  required bool Function() current,
+  required bool hls,
+}) async {
+  final start = clock.now();
+  final budget = hls ? kHlsFirstFrameTimeout : kFirstFrameTimeout;
+  final cap = hls ? kHlsFirstFrameHardCap : kFirstFrameTimeout;
+  while (current()) {
+    final seen = await probe();
+    if (!current()) {
+      return false;
+    }
+    if (seen == FrameProbe.frame) {
+      return true;
+    }
+    if (hls && seen == FrameProbe.failed) {
+      return false;
+    }
+    final elapsed = clock.now().difference(start);
+    if (elapsed >= cap ||
+        (elapsed >= budget && !(hls && seen == FrameProbe.progressing))) {
+      return false;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+  }
+  return false;
+}
 
 /// One route to attempt, in the order the gateway prefers.
 ///
@@ -448,28 +516,41 @@ class PlaybackEngine {
       case PlaybackPipeline.scale:
         await _startScale(streamId, candidate.path, gen, flv: candidate.flv);
     }
-    return _awaitFirstFrame(gen);
+    var lastBufferedEnd = Duration.zero;
+    return awaitFirstFrame(
+      // Never reads a newer session's frame as this open's.
+      current: () => gen == _gen,
+      hls: candidate.pipeline == PlaybackPipeline.scale && !candidate.flv,
+      probe: () async {
+        final controller = _videoController;
+        if (controller == null) {
+          return await _hasFrame() ? FrameProbe.frame : FrameProbe.waiting;
+        }
+        final v = controller.value;
+        if (v.hasError) {
+          return FrameProbe.failed;
+        }
+        if (v.isInitialized && v.position > Duration.zero) {
+          return FrameProbe.frame;
+        }
+        // Progress is buffering or the buffered end moving, not
+        // "initialized": every route that reaches this wait is initialized,
+        // stuck ones included.
+        final end =
+            v.buffered.isEmpty ? Duration.zero : v.buffered.last.end;
+        final grew = end > lastBufferedEnd;
+        lastBufferedEnd = end;
+        return v.isBuffering || grew
+            ? FrameProbe.progressing
+            : FrameProbe.waiting;
+      },
+    );
   }
 
-  /// Resolves true once the stream is actually rendering, false on timeout.
+  /// Whether the stream is actually rendering.
   ///
   /// Progress of the picture is the signal, not "initialized" or "connected" —
   /// both of those are true on a route that is sending nothing.
-  Future<bool> _awaitFirstFrame(int gen) async {
-    final deadline = DateTime.now().add(kFirstFrameTimeout);
-    // Never reads a newer session's frame as this open's.
-    while (gen == _gen && DateTime.now().isBefore(deadline)) {
-      if (await _hasFrame()) {
-        return gen == _gen;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-    }
-    // No last look: the loop already polled to within 200ms of the deadline, so
-    // another round trip fires after the budget is spent and can only repeat the
-    // answer we just had.
-    return false;
-  }
-
   Future<bool> _hasFrame() async {
     final controller = _videoController;
     if (controller != null) {
