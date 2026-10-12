@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -97,6 +98,118 @@ void main() {
       await sig.playOffer('s_xyz', 'offer');
       expect(captured.toString(),
           'https://engine.example/whep/s_xyz?token=playTOKEN',);
+    });
+  });
+
+  group('GatewaySignaling open-path bounds', () {
+    MebiusErrorCode? codeOf(Object? e) => e is MebiusError ? e.code : null;
+
+    test('a route probe nobody answers is aborted at 15 s; a late answer is '
+        'closed', () {
+      fakeAsync((async) {
+        final answer = Completer<http.StreamedResponse>();
+        final body = StreamController<List<int>>();
+        var cancelled = false;
+        var aborted = false;
+        body.onCancel = () => cancelled = true;
+        final sig = GatewaySignaling(
+          gateway: 'https://engine.example',
+          token: 'tok',
+          httpClient: MockClient.streaming((req, _) {
+            unawaited(
+              (req as http.Abortable).abortTrigger!.then((_) => aborted = true),
+            );
+            return answer.future;
+          }),
+        );
+        Object? error;
+        unawaited(
+          sig.ensureScaleReachable('s', 'https://engine.example/d/wide/s').then(
+            (_) {},
+            onError: (Object e) {
+              error = e;
+            },
+          ),
+        );
+        async.elapse(const Duration(seconds: 14));
+        expect(error, isNull);
+        expect(aborted, isFalse);
+        async.elapse(const Duration(seconds: 1));
+        expect(codeOf(error), MebiusErrorCode.connectionFailed);
+        expect(aborted, isTrue, reason: 'the socket must be closed');
+        answer.complete(http.StreamedResponse(body.stream, 200));
+        async.flushMicrotasks();
+        expect(cancelled, isTrue, reason: 'late connection must be closed');
+        unawaited(body.close());
+      });
+    });
+
+    test('an SDP exchange nobody answers is aborted at 15 s; a late session '
+        'is deleted', () {
+      fakeAsync((async) {
+        final answer = Completer<http.StreamedResponse>();
+        final deleted = <Uri>[];
+        var aborted = false;
+        final sig = GatewaySignaling(
+          gateway: 'https://engine.example',
+          token: 'tok',
+          httpClient: MockClient.streaming((req, _) {
+            if (req.method == 'DELETE') {
+              deleted.add(req.url);
+              return Future.value(
+                http.StreamedResponse(const Stream.empty(), 200),
+              );
+            }
+            unawaited(
+              (req as http.Abortable).abortTrigger!.then((_) => aborted = true),
+            );
+            return answer.future;
+          }),
+        );
+        Object? error;
+        unawaited(
+          sig.playOffer('s', 'offer').then(
+            (_) {},
+            onError: (Object e) {
+              error = e;
+            },
+          ),
+        );
+        async.elapse(const Duration(seconds: 15));
+        expect(codeOf(error), MebiusErrorCode.connectionFailed);
+        expect(aborted, isTrue);
+        answer.complete(
+          http.StreamedResponse(
+            Stream.value('answer'.codeUnits),
+            201,
+            headers: {'location': '/whep/s/r1'},
+          ),
+        );
+        async.flushMicrotasks();
+        expect(deleted.map((u) => u.path), ['/whep/s/r1']);
+      });
+    });
+
+    test('a malformed gateway URL is connectionFailed, not unknown', () async {
+      final sig = GatewaySignaling(
+        gateway: 'http://[bad',
+        token: 'tok',
+        httpClient: MockClient((_) async => http.Response('', 200)),
+      );
+      await expectLater(
+        sig.ensureScaleReachable('s'),
+        throwsA(
+          isA<MebiusError>()
+              .having((e) => e.code, 'code', MebiusErrorCode.connectionFailed),
+        ),
+      );
+      await expectLater(
+        sig.playOffer('s', 'offer'),
+        throwsA(
+          isA<MebiusError>()
+              .having((e) => e.code, 'code', MebiusErrorCode.connectionFailed),
+        ),
+      );
     });
   });
 }

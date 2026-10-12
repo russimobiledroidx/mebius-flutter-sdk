@@ -37,6 +37,14 @@ class SdpExchangeResult {
   final String? resourceUrl;
 }
 
+/// Upper bound on one gateway request on the open path: the route probe and
+/// the real-time SDP exchange.
+///
+/// Without it an edge that accepts the connection and never answers held the
+/// viewer on "connecting" forever: no error, so no next route. 15 s is well
+/// past a cold edge's slowest observed answer (~6 s).
+const Duration kGatewayRequestTimeout = Duration(seconds: 15);
+
 /// Thin HTTP signaling client that talks to the Mebius gateway.
 ///
 /// Translates raw transport responses into [MebiusError]s using Mebius
@@ -120,15 +128,79 @@ class GatewaySignaling {
   }
 
   Future<SdpExchangeResult> _sdpExchange(String url, String offerSdp) async {
-    http.Response response;
+    final response = await _send(
+      'POST',
+      url,
+      headers: {'Content-Type': 'application/sdp'},
+      body: offerSdp,
+      read: http.Response.fromStream,
+      // A late answer still created a session on the gateway; release it.
+      onLate: (late) {
+        final location = late.headers['location'];
+        if (location != null) {
+          unawaited(deleteResource(_resolve(location)));
+        }
+      },
+    );
+    _throwForStatus(response.statusCode);
+    final location = response.headers['location'];
+    return SdpExchangeResult(
+      answerSdp: response.body,
+      resourceUrl: location == null ? null : _resolve(location),
+    );
+  }
+
+  /// One gateway request on the open path, bounded by
+  /// [kGatewayRequestTimeout] including [read] of its response.
+  ///
+  /// On timeout the request is aborted, so the socket closes, and the caller
+  /// gets `connectionFailed`. If the response had already arrived, [onLate]
+  /// sees it and its body is cancelled. Any failure to build or send the
+  /// request, a malformed URL included, is `connectionFailed` too.
+  Future<T> _send<T>(
+    String method,
+    String url, {
+    required Future<T> Function(http.StreamedResponse) read,
+    Map<String, String> headers = const {},
+    String? body,
+    void Function(http.StreamedResponse late)? onLate,
+  }) async {
+    final abort = Completer<void>();
+    Future<http.StreamedResponse>? sent;
     try {
-      response = await _http.post(
+      final request = http.AbortableRequest(
+        method,
         Uri.parse(url),
-        headers: {
-          ..._authHeaders,
-          'Content-Type': 'application/sdp',
-        },
-        body: offerSdp,
+        abortTrigger: abort.future,
+      )
+        ..headers.addAll(_authHeaders)
+        ..headers.addAll(headers);
+      if (body != null) {
+        request.body = body;
+      }
+      sent = _http.send(request);
+      return await sent.then(read).timeout(kGatewayRequestTimeout);
+    } on TimeoutException catch (e) {
+      abort.complete();
+      unawaited(
+        sent!.then<void>(
+          (late) {
+            onLate?.call(late);
+            // The abort closes it on clients that support aborting; this
+            // closes it on the rest. [read] may already be listening.
+            try {
+              unawaited(late.stream.listen(null, onError: (_) {}).cancel());
+            } on Object catch (_) {
+              // Already listened to by [read]; the abort covers it.
+            }
+          },
+          onError: (Object _) {},
+        ),
+      );
+      throw MebiusError(
+        MebiusErrorCode.connectionFailed,
+        'The Mebius gateway did not answer in time.',
+        cause: e,
       );
     } catch (e) {
       throw MebiusError(
@@ -137,12 +209,6 @@ class GatewaySignaling {
         cause: e,
       );
     }
-    _throwForStatus(response.statusCode);
-    final location = response.headers['location'];
-    return SdpExchangeResult(
-      answerSdp: response.body,
-      resourceUrl: location == null ? null : _resolve(location),
-    );
   }
 
   /// Tears down a previously created session resource.
@@ -156,24 +222,18 @@ class GatewaySignaling {
 
   /// Verifies that the configured stream playlist is reachable for scale mode.
   Future<void> ensureScaleReachable(String streamId, [String? url]) async {
-    http.StreamedResponse response;
-    try {
-      final request =
-          http.Request('GET', Uri.parse(url ?? scalePlaylistUrl(streamId)))
-            ..headers.addAll(_authHeaders);
-      response = await _http.send(request);
-    } catch (e) {
-      throw MebiusError(
-        MebiusErrorCode.connectionFailed,
-        'Could not reach the Mebius gateway.',
-        cause: e,
-      );
-    }
-    // Only the status line matters. A live FLV route never ends its body, so
-    // reading it (as a plain GET does) would hang the probe forever; cancelling
-    // the body closes the connection after the headers.
-    unawaited(response.stream.listen(null, onError: (_) {}).cancel());
-    _throwForStatus(response.statusCode);
+    final status = await _send(
+      'GET',
+      url ?? scalePlaylistUrl(streamId),
+      // Only the status line matters. A live FLV route never ends its body,
+      // so reading it (as a plain GET does) would hang the probe forever;
+      // cancelling the body closes the connection after the headers.
+      read: (response) async {
+        unawaited(response.stream.listen(null, onError: (_) {}).cancel());
+        return response.statusCode;
+      },
+    );
+    _throwForStatus(status);
   }
 
   String _resolve(String location) {

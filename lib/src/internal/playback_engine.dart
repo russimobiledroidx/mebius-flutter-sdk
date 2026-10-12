@@ -10,6 +10,9 @@
 // Internal implementation detail; not part of the documented public surface.
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
@@ -33,7 +36,140 @@ enum PlaybackPipeline {
 /// ingest yet answers 200 with an empty stream, and a WebRTC connection reports
 /// `connected` while zero frames arrive. 8s survives a slow first segment on
 /// mobile data and is short enough that the viewer has not left yet.
+///
+/// This is the budget for FLV and WebRTC, which show a picture in about half a
+/// second when they work. HLS gets [kHlsFirstFrameTimeout].
 const Duration kFirstFrameTimeout = Duration(seconds: 8);
+
+/// First-frame budget for an HLS route (`wide`, `local`, origin playlist).
+///
+/// A cold CDN edge answers the master and media playlists in 5–6 s each on the
+/// first request, and AVPlayer then buffers a few 3–4 s segments before it
+/// moves the playhead. 8 s abandoned healthy routes on iPhone, and each
+/// abandoned route restarts the next one from zero: a "connecting" loop.
+const Duration kHlsFirstFrameTimeout = Duration(seconds: 20);
+
+/// How long an HLS route that is still visibly loading may run past
+/// [kHlsFirstFrameTimeout] before it is abandoned anyway.
+const Duration kHlsFirstFrameHardCap = Duration(seconds: 30);
+
+/// How long after the buffered end last moved an HLS route still counts as
+/// loading. A live playlist's buffer grows one 3–4 s segment at a time, so
+/// "grew since the last 200 ms poll" is false most of the time even on a
+/// route that is loading fine.
+const Duration kHlsProgressWindow = Duration(seconds: 5);
+
+/// Upper bound on the platform player's `initialize()` for an HLS route. An
+/// AVPlayer item stuck in "unknown" never completes it, and nothing else
+/// would move the viewer on.
+const Duration kHlsInitializeTimeout = Duration(seconds: 20);
+
+/// Upper bound on `initialize()` for the FLV route, which opens in about half
+/// a second when it works.
+const Duration kFlvInitializeTimeout = Duration(seconds: 15);
+
+/// Whether an HLS route that has not shown a frame yet is still loading.
+///
+/// AVPlayer reports `isBuffering` only on change, so before the first frame
+/// it usually stays false; the buffered end is the signal that moves. It is
+/// remembered with the time it last grew, so a route counts as loading for
+/// [kHlsProgressWindow] after each segment arrives.
+class HlsProgress {
+  Duration _end = Duration.zero;
+  DateTime? _grewAt;
+
+  bool progressing({required bool isBuffering, required Duration bufferedEnd}) {
+    final now = clock.now();
+    if (bufferedEnd > _end) {
+      _end = bufferedEnd;
+      _grewAt = now;
+    }
+    final grewAt = _grewAt;
+    return isBuffering ||
+        (grewAt != null && now.difference(grewAt) <= kHlsProgressWindow);
+  }
+}
+
+/// Runs [initialize] with an upper bound of [limit].
+///
+/// On timeout the walk gets `connectionFailed` at once and moves to the next
+/// route, and [dispose] is started without being awaited:
+/// `VideoPlayerController.dispose` waits for the native create step itself and
+/// is idempotent, so a player whose open never completes is still released
+/// rather than left fetching. On any other failure [dispose] runs before the
+/// error is rethrown.
+Future<void> initializeWithin(
+  Future<void> Function() initialize,
+  Future<void> Function() dispose,
+  Duration limit,
+) async {
+  final init = initialize();
+  try {
+    await init.timeout(limit);
+  } on TimeoutException catch (e) {
+    unawaited(dispose());
+    throw MebiusError(
+      MebiusErrorCode.connectionFailed,
+      'The stream did not start in time.',
+      cause: e,
+    );
+  } on Object {
+    await dispose();
+    rethrow;
+  }
+}
+
+/// What one poll of a route that is still opening saw.
+enum FrameProbe {
+  /// The picture is moving.
+  frame,
+
+  /// No picture yet, but media is still arriving.
+  progressing,
+
+  /// No picture and no sign of progress.
+  waiting,
+
+  /// The player reported an error; this route will not recover by waiting.
+  failed,
+}
+
+/// Polls [probe] until a first frame, and decides when to give up.
+///
+/// FLV and WebRTC ([hls] false) keep the plain [kFirstFrameTimeout] and
+/// ignore everything but `frame`, exactly as before. HLS gets
+/// [kHlsFirstFrameTimeout], is abandoned at once on `failed`, and past that
+/// budget keeps going while the probe reports `progressing` — up to
+/// [kHlsFirstFrameHardCap]. [current] is the engine's generation check: once
+/// it is false the open was retired, and nothing it reads counts.
+Future<bool> awaitFirstFrame({
+  required Future<FrameProbe> Function() probe,
+  required bool Function() current,
+  required bool hls,
+}) async {
+  final start = clock.now();
+  final budget = hls ? kHlsFirstFrameTimeout : kFirstFrameTimeout;
+  final cap = hls ? kHlsFirstFrameHardCap : kFirstFrameTimeout;
+  while (current()) {
+    final seen = await probe();
+    if (!current()) {
+      return false;
+    }
+    if (seen == FrameProbe.frame) {
+      return true;
+    }
+    if (hls && seen == FrameProbe.failed) {
+      return false;
+    }
+    final elapsed = clock.now().difference(start);
+    if (elapsed >= cap ||
+        (elapsed >= budget && !(hls && seen == FrameProbe.progressing))) {
+      return false;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+  }
+  return false;
+}
 
 /// One route to attempt, in the order the gateway prefers.
 ///
@@ -327,6 +463,12 @@ class PlaybackEngine {
 
   double _volume = 1;
 
+  /// Builds the platform player for a scale route. Replaced in tests.
+  @visibleForTesting
+  VideoPlayerController Function(Uri url, VideoFormat? formatHint)
+      createController = (url, formatHint) =>
+          VideoPlayerController.networkUrl(url, formatHint: formatHint);
+
   /// Bumped by [stop]. An open captures it when it begins and publishes into
   /// the fields above only while it is unchanged, so an open that outlives a
   /// [stop] — a quality reopen still in flight when the viewer switched
@@ -448,28 +590,41 @@ class PlaybackEngine {
       case PlaybackPipeline.scale:
         await _startScale(streamId, candidate.path, gen, flv: candidate.flv);
     }
-    return _awaitFirstFrame(gen);
+    final progress = HlsProgress();
+    return awaitFirstFrame(
+      // Never reads a newer session's frame as this open's.
+      current: () => gen == _gen,
+      hls: candidate.pipeline == PlaybackPipeline.scale && !candidate.flv,
+      probe: () async {
+        final controller = _videoController;
+        if (controller == null) {
+          return await _hasFrame() ? FrameProbe.frame : FrameProbe.waiting;
+        }
+        final v = controller.value;
+        if (v.hasError) {
+          return FrameProbe.failed;
+        }
+        if (v.isInitialized && v.position > Duration.zero) {
+          return FrameProbe.frame;
+        }
+        // Progress is buffering or the buffered end moving recently, not
+        // "initialized": every route that reaches this wait is initialized,
+        // stuck ones included.
+        return progress.progressing(
+          isBuffering: v.isBuffering,
+          bufferedEnd:
+              v.buffered.isEmpty ? Duration.zero : v.buffered.last.end,
+        )
+            ? FrameProbe.progressing
+            : FrameProbe.waiting;
+      },
+    );
   }
 
-  /// Resolves true once the stream is actually rendering, false on timeout.
+  /// Whether the stream is actually rendering.
   ///
   /// Progress of the picture is the signal, not "initialized" or "connected" —
   /// both of those are true on a route that is sending nothing.
-  Future<bool> _awaitFirstFrame(int gen) async {
-    final deadline = DateTime.now().add(kFirstFrameTimeout);
-    // Never reads a newer session's frame as this open's.
-    while (gen == _gen && DateTime.now().isBefore(deadline)) {
-      if (await _hasFrame()) {
-        return gen == _gen;
-      }
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-    }
-    // No last look: the loop already polled to within 200ms of the deadline, so
-    // another round trip fires after the budget is spent and can only repeat the
-    // answer we just had.
-    return false;
-  }
-
   Future<bool> _hasFrame() async {
     final controller = _videoController;
     if (controller != null) {
@@ -561,28 +716,39 @@ class PlaybackEngine {
     // playlist as a progressive file and fails with UnrecognizedInputFormat.
     // FLV is exactly that progressive case, so it gets no hint and the player
     // sniffs the container.
-    final controller = VideoPlayerController.networkUrl(
-      Uri.parse(url),
-      formatHint: flv ? null : VideoFormat.hls,
-    );
+    final controller =
+        createController(Uri.parse(url), flv ? null : VideoFormat.hls);
     // Published: from here a stop() disposes it.
     _videoController = controller;
     _flv = flv;
     try {
-      await controller.initialize();
+      await initializeWithin(
+        controller.initialize,
+        // Unpublished first, so nothing (MebiusView, readStats, a concurrent
+        // stop) reaches a controller that is being disposed.
+        () {
+          if (_videoController == controller) {
+            _videoController = null;
+          }
+          return controller.dispose();
+        },
+        flv ? kFlvInitializeTimeout : kHlsInitializeTimeout,
+      );
     } catch (e) {
+      // initializeWithin has disposed it, or will once a late open settles.
       if (_videoController == controller) {
         _videoController = null;
       }
-      await controller.dispose();
       if (gen != _gen) {
         throw _stopped;
       }
-      throw MebiusError(
-        MebiusErrorCode.connectionFailed,
-        'Playback could not be started for this stream.',
-        cause: e,
-      );
+      throw e is MebiusError
+          ? e
+          : MebiusError(
+              MebiusErrorCode.connectionFailed,
+              'Playback could not be started for this stream.',
+              cause: e,
+            );
     }
     if (gen != _gen) {
       // stop() already disposed it.

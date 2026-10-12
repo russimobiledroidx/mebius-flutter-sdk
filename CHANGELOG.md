@@ -1,3 +1,25 @@
+## 0.6.1
+
+- iPhone viewers no longer get stuck on "connecting" on CDN (HLS) streams.
+  Every route had 8 s to show a first frame, but a cold CDN edge takes 5–6 s
+  per playlist on the first request and AVPlayer then buffers a few 3–4 s
+  segments, so healthy HLS routes were abandoned and the next route started
+  again from zero. HLS routes (`wide`, `local`, origin) now get 20 s, and past
+  that keep going while media is still arriving, up to 30 s. "Still arriving"
+  means the player is buffering or the buffered range grew within the last
+  5 s: AVPlayer does not report buffering before the first frame, and a live
+  playlist's buffer grows one segment at a time. A player error abandons the
+  route at once. FLV and WebRTC keep 8 s, unchanged.
+- Nothing on the open path can hang forever any more. Gateway requests —
+  the route probe, and the SDP exchange for both watching (WHEP) and
+  broadcasting (WHIP, `MebiusBroadcaster.start`) — give up after 15 s and are
+  aborted, closing the socket. The HLS player's `initialize()` gives up after
+  20 s and the FLV player's after 15 s, and the player is disposed at once,
+  even if its open never completes. Each then moves on to the next route. An
+  answer that still arrives late is cleaned up: the probe's connection is
+  closed and a session the gateway created is deleted. A malformed gateway
+  URL now reports `CONNECTION_FAILED` instead of `UNKNOWN`.
+
 ## 0.6.0
 
 - Quality selection for streams with a rendition ladder (1080p/720p/540p/480p
