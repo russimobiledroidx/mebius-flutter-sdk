@@ -1,3 +1,14 @@
+## 0.7.0
+
+- `createBroadcaster(source:)` publishes a stream the app opened itself (a
+  screen capture, say) instead of opening the camera and microphone.
+- `createBroadcaster(iceServers:)` and `createPlayer(iceServers:)` take
+  RTCIceServer maps for networks that need TURN. The default, none, is the
+  same configuration as before.
+- Stopping a broadcast releases the camera and the connection before telling
+  the gateway, and that last request now gives up after 3 s, so stop never
+  hangs on a dead network.
+
 ## 0.6.2
 
 - iOS live HLS reconnected every ~12 s because video_player clamps position to

@@ -44,10 +44,12 @@ class MebiusPlayer {
     required GatewaySignaling signaling,
     required this.mode,
     List<MebiusDelivery> deliveries = const <MebiusDelivery>[],
+    List<Map<String, dynamic>> iceServers = const <Map<String, dynamic>>[],
     @visibleForTesting PlaybackEngine? engine,
   }) : _engine = engine ??
             PlaybackEngine(
               signaling: signaling,
+              iceServers: iceServers,
               pipeline: mode == MebiusPlayerMode.lowLatency
                   ? PlaybackPipeline.lowLatency
                   : PlaybackPipeline.scale,
