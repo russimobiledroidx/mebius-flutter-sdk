@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:clock/clock.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' show MediaStream;
 
 import 'package:mebius/src/internal/broadcast_engine.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
@@ -151,10 +152,20 @@ class MebiusClient {
   /// viewer is delivered at exactly the bitrate published here. One broadcaster's
   /// setting is multiplied by the size of its audience — a number that looks
   /// generous for one host is a bandwidth bill for a thousand viewers.
+  ///
+  /// [source] publishes a stream the app opened itself (a screen capture, say)
+  /// instead of opening the camera and microphone; [video]/[audio] then only
+  /// gate the call, the stream decides what is sent. The broadcaster owns it:
+  /// its tracks are stopped and it is disposed on stop.
+  ///
+  /// [iceServers] are RTCIceServer maps (`urls`, `username`, `credential`) for
+  /// a network that needs TURN. Empty, the default, is unchanged behaviour.
   MebiusBroadcaster createBroadcaster({
     bool video = true,
     bool audio = true,
     int? maxBitrateKbps = kDefaultMaxBitrateKbps,
+    Future<MediaStream> Function()? source,
+    List<Map<String, dynamic>> iceServers = const <Map<String, dynamic>>[],
   }) {
     _ensureConnected();
     if (!video && !audio) {
@@ -168,6 +179,8 @@ class MebiusClient {
       signaling: _signaling,
       video: video,
       audio: audio,
+      source: source,
+      iceServers: iceServers,
     );
     _broadcasters.add(broadcaster);
     return broadcaster;
@@ -181,14 +194,19 @@ class MebiusClient {
   /// The default changed from `lowLatency` to [MebiusPlayerMode.auto]: a plain
   /// viewer does not need a real-time connection, and defaulting to one spent a
   /// per-viewer server session on every audience member.
+  ///
+  /// [iceServers] are RTCIceServer maps for the real-time route, as on
+  /// [createBroadcaster]. Empty, the default, is unchanged behaviour.
   MebiusPlayer createPlayer({
     MebiusPlayerMode mode = MebiusPlayerMode.auto,
+    List<Map<String, dynamic>> iceServers = const <Map<String, dynamic>>[],
   }) {
     _ensureConnected();
     final player = MebiusPlayer.internal(
       signaling: _signaling,
       mode: mode,
       deliveries: _deliveries,
+      iceServers: iceServers,
     );
     _players.add(player);
     return player;

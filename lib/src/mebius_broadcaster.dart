@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter_webrtc/flutter_webrtc.dart' show MediaStream;
+
 import 'package:mebius/src/internal/broadcast_engine.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/mebius_error.dart';
@@ -26,11 +28,15 @@ class MebiusBroadcaster {
     required bool video,
     required bool audio,
     int? maxBitrateKbps = kDefaultMaxBitrateKbps,
+    Future<MediaStream> Function()? source,
+    List<Map<String, dynamic>> iceServers = const <Map<String, dynamic>>[],
   }) : _engine = BroadcastEngine(
           signaling: signaling,
           video: video,
           audio: audio,
           maxBitrateKbps: maxBitrateKbps,
+          source: source,
+          iceServers: iceServers,
         );
 
   final BroadcastEngine _engine;

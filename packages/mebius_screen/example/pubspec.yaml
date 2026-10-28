@@ -1,0 +1,19 @@
+name: mebius_screen_example
+description: Minimal screen-share agent built on mebius_screen.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  mebius_screen:
+    path: ..
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

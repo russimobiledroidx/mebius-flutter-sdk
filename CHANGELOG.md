@@ -1,3 +1,13 @@
+## Unreleased
+
+- `createBroadcaster(source:)` publishes a stream the app opened itself (a
+  screen capture, say) instead of opening the camera and microphone.
+- `createBroadcaster(iceServers:)` and `createPlayer(iceServers:)` take
+  RTCIceServer maps for networks that need TURN. The default, none, is the
+  same configuration as before.
+- New package `packages/mebius_screen`: desktop screen-share agent and viewer,
+  built on the above.
+
 ## 0.6.2
 
 - iOS live HLS reconnected every ~12 s because video_player clamps position to

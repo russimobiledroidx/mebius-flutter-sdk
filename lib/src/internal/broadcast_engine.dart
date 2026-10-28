@@ -24,6 +24,17 @@ import 'package:mebius/src/mebius_error.dart';
 /// others makes the cost of a broadcast depend on which phone made it.
 const int kDefaultMaxBitrateKbps = 2500;
 
+/// Opens a peer connection; flutter_webrtc's unless a test supplies one.
+typedef OpenPeerConnection = Future<RTCPeerConnection> Function(
+  Map<String, dynamic> configuration,
+);
+
+/// The peer connection configuration both engines open with. [iceServers] is
+/// RTCIceServer-shaped (`urls`, `username`, `credential`); empty keeps the
+/// host/srflx-only behaviour every release before it had.
+Map<String, dynamic> peerConfiguration(List<Map<String, dynamic>> iceServers) =>
+    {'iceServers': iceServers, 'sdpSemantics': 'unified-plan'};
+
 /// Drives camera/mic capture and the WHIP publish session.
 class BroadcastEngine {
   BroadcastEngine({
@@ -31,6 +42,9 @@ class BroadcastEngine {
     required this.video,
     required this.audio,
     this.maxBitrateKbps = kDefaultMaxBitrateKbps,
+    this.source,
+    this.iceServers = const <Map<String, dynamic>>[],
+    this.openPeerConnection = createPeerConnection,
   });
 
   final GatewaySignaling signaling;
@@ -40,6 +54,15 @@ class BroadcastEngine {
   /// Ceiling on what the encoder may send, in kbps. Zero or null lifts it and
   /// leaves the choice to WebRTC.
   final int? maxBitrateKbps;
+
+  /// Supplies the media to publish instead of the camera/microphone, e.g. a
+  /// screen capture. Its tracks are stopped and the stream disposed on [stop].
+  final Future<MediaStream> Function()? source;
+
+  /// ICE servers (TURN/STUN) for the publish connection.
+  final List<Map<String, dynamic>> iceServers;
+
+  final OpenPeerConnection openPeerConnection;
 
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
@@ -57,7 +80,10 @@ class BroadcastEngine {
       return;
     }
     try {
-      _localStream = await navigator.mediaDevices.getUserMedia({
+      final source = this.source;
+      _localStream = source != null
+          ? await source()
+          : await navigator.mediaDevices.getUserMedia({
         'audio': audio,
         'video': video
             ? {
@@ -87,10 +113,7 @@ class BroadcastEngine {
       );
     }
 
-    final pc = await createPeerConnection({
-      'iceServers': <Map<String, dynamic>>[],
-      'sdpSemantics': 'unified-plan',
-    });
+    final pc = await openPeerConnection(peerConfiguration(iceServers));
     _pc = pc;
 
     for (final track in _localStream!.getTracks()) {

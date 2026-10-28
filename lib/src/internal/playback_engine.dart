@@ -15,6 +15,8 @@ import 'dart:async';
 import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:mebius/src/internal/broadcast_engine.dart'
+    show OpenPeerConnection, peerConfiguration;
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/mebius_delivery.dart';
 import 'package:mebius/src/mebius_error.dart';
@@ -477,10 +479,20 @@ int decodedVideoFrames(List<StatsReport> reports) {
 
 /// Drives inbound playback for a single stream.
 class PlaybackEngine {
-  PlaybackEngine({required this.signaling, required this.pipeline});
+  PlaybackEngine({
+    required this.signaling,
+    required this.pipeline,
+    this.iceServers = const <Map<String, dynamic>>[],
+    this.openPeerConnection = createPeerConnection,
+  });
 
   final GatewaySignaling signaling;
   final PlaybackPipeline pipeline;
+
+  /// ICE servers (TURN/STUN) for the real-time route.
+  final List<Map<String, dynamic>> iceServers;
+
+  final OpenPeerConnection openPeerConnection;
 
   /// Routes supplied by the gateway, in the gateway's preferred order.
   List<MebiusDelivery> deliveries = const <MebiusDelivery>[];
@@ -718,10 +730,7 @@ class PlaybackEngine {
   }
 
   Future<void> _startLowLatency(String streamId, int gen) async {
-    final pc = await createPeerConnection({
-      'iceServers': <Map<String, dynamic>>[],
-      'sdpSemantics': 'unified-plan',
-    });
+    final pc = await openPeerConnection(peerConfiguration(iceServers));
     if (gen != _gen) {
       await pc.close();
       await pc.dispose();
