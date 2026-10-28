@@ -11,17 +11,12 @@ The protocol it speaks (REST, the agent event stream, WHIP/WHEP, the input schem
 
 ## Install
 
-Not on pub.dev yet. Depend on it from git:
-
-```yaml
-dependencies:
-  mebius_screen:
-    git:
-      url: https://github.com/russimobiledroidx/mebius-flutter-sdk
-      path: packages/mebius_screen
+```sh
+flutter pub add mebius_screen
 ```
 
-Requires Flutter 3.38+ (Dart 3.10+).
+Requires Flutter 3.38+ (Dart 3.10+). It pulls in `mebius` at a matching
+minor version.
 
 ## Agent
 
@@ -85,10 +80,12 @@ await viewer.close();
 
 ### macOS (13+)
 
+Set `MACOSX_DEPLOYMENT_TARGET` to 13.0 or later (the example does).
+
 The agent needs two privacy permissions, granted by the user in System Settings → Privacy & Security, or by an MDM PPPC profile on managed machines:
 
 - **Screen Recording**: for the capture. Without it macOS captures the wallpaper only.
-- **Accessibility**: for remote control. Without it macOS silently drops injected input.
+- **Accessibility**: for remote control. Without it macOS silently drops injected input; the agent checks for it and reports `permissionDenied` on `onError` instead.
 
 Entitlements (see `example/macos/Runner/*.entitlements`):
 
@@ -105,11 +102,13 @@ Pointer positions use `SendInput`'s absolute coordinates on the primary monitor,
 
 ### Other platforms
 
-The viewer works anywhere `mebius` real-time playback works. On platforms other than macOS and Windows the agent publishes but ignores input.
+The agent's remote control is macOS and Windows only; elsewhere input is ignored. The viewer runs on any platform with `dart:ffi` (not the web; a web dashboard uses `@mebius-io/web`).
 
 ## Keys
 
-Input carries `KeyboardEvent.code` values (physical keys). Both agents map: `KeyA`–`KeyZ`, `Digit0`–`Digit9`, `Enter`, `Escape`, `Backspace`, `Tab`, `Space`, the four arrows, left/right `Shift`/`Control`/`Alt`/`Meta`, and `F1`–`F12`. Other keys are ignored. The character a key produces follows the agent's keyboard layout.
+Input carries `KeyboardEvent.code` values (physical keys). Both agents map letters, digits, punctuation (`Minus` … `Slash`, `Backquote`, `IntlBackslash`), `Enter`, `Escape`, `Backspace`, `Tab`, `Space`, `CapsLock`, the arrows, `Insert`/`Delete`/`Home`/`End`/`PageUp`/`PageDown`, left/right `Shift`/`Control`/`Alt`/`Meta`, `F1`–`F12`, the numpad (`Numpad0`–`Numpad9`, operators, `NumpadDecimal`, `NumpadEnter`), `ContextMenu` and `PrintScreen`. Other keys are ignored. The character a key produces follows the agent's keyboard layout.
+
+Keys and buttons still held when a session ends, control is switched off, or the view loses focus are released, so nothing stays pressed on the device.
 
 ## Limits
 
@@ -124,3 +123,7 @@ Input carries `KeyboardEvent.code` values (physical keys). Both agents map: `Key
 cd example
 flutter run -d macos
 ```
+
+## Developing in this repo
+
+`pubspec_overrides.yaml` points `mebius` at the repo root, so `flutter pub get`, `flutter analyze` and `flutter test` here build against the local `mebius`. Publish with `tool/publish_mebius_screen.sh` from the repo root (it explains why), after the matching `mebius` is on pub.dev.

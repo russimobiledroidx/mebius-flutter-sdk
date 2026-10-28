@@ -1,8 +1,8 @@
 name: mebius_screen
 description: Desktop screen-share agent and viewer for Mebius — enroll a device, publish its screen on demand, and watch or remote-control it.
 version: 0.1.0
-publish_to: none
-repository: https://github.com/russimobiledroidx/mebius-flutter-sdk
+repository: https://github.com/russimobiledroidx/mebius-flutter-sdk/tree/main/packages/mebius_screen
+issue_tracker: https://github.com/russimobiledroidx/mebius-flutter-sdk/issues
 
 environment:
   # win32 6 is written with dot shorthands, which need Dart 3.10.
@@ -17,8 +17,10 @@ dependencies:
   flutter_secure_storage: ^11.2.0
   flutter_webrtc: ^1.6.0
   http: ^1.6.0
-  mebius:
-    path: ../..
+  # Tight on purpose: this package reaches into mebius beyond its documented
+  # API (MebiusClient.internal, MebiusPlayer.engine), which a minor release
+  # may change. In this repo pubspec_overrides.yaml points it at ../.. .
+  mebius: ">=0.7.0 <0.8.0"
   meta: ^1.16.0
   win32: ^6.4.0
 
