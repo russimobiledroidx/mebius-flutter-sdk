@@ -21,6 +21,7 @@ class _Store implements MebiusCredentialStore {
 
 class _Publisher implements ScreenPublisher {
   final List<String> log = [];
+  Error? failStart;
   Map<String, Object?>? lastStart;
   @override
   Future<void> start({
@@ -30,6 +31,9 @@ class _Publisher implements ScreenPublisher {
     required List<Map<String, dynamic>> iceServers,
   }) async {
     log.add('start $sessionId');
+    if (failStart != null) {
+      throw failStart!;
+    }
     lastStart = {
       'token': publishToken,
       'kbps': maxBitrateKbps,
@@ -43,8 +47,25 @@ class _Publisher implements ScreenPublisher {
 
 class _Injector implements InputInjector {
   final List<MebiusInputEvent> events = [];
+  int releases = 0;
+  Error? fail;
   @override
-  void inject(MebiusInputEvent event) => events.add(event);
+  void inject(MebiusInputEvent event) {
+    if (fail != null) {
+      throw fail!;
+    }
+    events.add(event);
+  }
+
+  @override
+  void releaseAll() => releases++;
+}
+
+class _ClosableClient extends MockClient {
+  _ClosableClient(super.fn) : super.streaming();
+  bool closed = false;
+  @override
+  void close() => closed = true;
 }
 
 /// An engine whose event stream the test writes to.
@@ -53,7 +74,7 @@ class _Engine {
   final List<http.BaseRequest> requests = [];
   int status = 200;
 
-  late final http.Client client = MockClient.streaming((req, _) async {
+  late final _ClosableClient client = _ClosableClient((req, _) async {
     requests.add(req);
     final c = StreamController<List<int>>();
     streams.add(c);
@@ -64,7 +85,8 @@ class _Engine {
       streams.last.add(utf8.encode('data: ${jsonEncode(event)}\n\n'));
 }
 
-Future<void> _settle() => Future<void>.delayed(const Duration(milliseconds: 10));
+Future<void> _settle() =>
+    Future<void>.delayed(const Duration(milliseconds: 10));
 
 void main() {
   late _Store store;
@@ -95,28 +117,28 @@ void main() {
   tearDown(() => agent.disconnect());
 
   Map<String, Object?> start(String id, {String mode = 'control'}) => {
-        'type': 'session.start',
-        'sessionId': id,
-        'mode': mode,
-        'userId': 'admin-42',
-        'publishToken': 'pub_$id',
-        'maxBitrateKbps': 900,
-        'iceServers': [
-          {
-            'urls': ['turn:t.example:3478'],
-            'username': 'u',
-            'credential': 'c',
-          },
-        ],
-      };
+    'type': 'session.start',
+    'sessionId': id,
+    'mode': mode,
+    'userId': 'admin-42',
+    'publishToken': 'pub_$id',
+    'maxBitrateKbps': 900,
+    'iceServers': [
+      {
+        'urls': ['turn:t.example:3478'],
+        'username': 'u',
+        'credential': 'c',
+      },
+    ],
+  };
 
   Map<String, Object?> input(String id) => {
-        'type': 'input',
-        'sessionId': id,
-        'input': [
-          {'type': 'move', 'x': 0.5, 'y': 0.25},
-        ],
-      };
+    'type': 'input',
+    'sessionId': id,
+    'input': [
+      {'type': 'move', 'x': 0.5, 'y': 0.25},
+    ],
+  };
 
   group('enroll', () {
     test('stores the credentials the engine returns', () async {
@@ -153,8 +175,11 @@ void main() {
       await expectLater(
         a.enroll(code: 'enr_x', name: 'n', os: 'windows'),
         throwsA(
-          isA<MebiusError>()
-              .having((e) => e.code, 'code', MebiusErrorCode.tokenExpired),
+          isA<MebiusError>().having(
+            (e) => e.code,
+            'code',
+            MebiusErrorCode.tokenExpired,
+          ),
         ),
       );
       expect(store.value, isNull);
@@ -170,7 +195,10 @@ void main() {
     await agent.connect();
     await _settle();
     final req = engine.requests.single;
-    expect(req.url.toString(), 'https://engine.example/api/v1/screen/agent/events');
+    expect(
+      req.url.toString(),
+      'https://engine.example/api/v1/screen/agent/events',
+    );
     expect(req.headers['Authorization'], 'Bearer dsk_secret');
   });
 
@@ -202,7 +230,9 @@ void main() {
 
     engine.send({'type': 'session.stop', 'sessionId': 'scr_other'});
     await _settle();
-    expect(publisher.log, ['start scr_1'], reason: 'another session is ignored');
+    expect(publisher.log, [
+      'start scr_1',
+    ], reason: 'another session is ignored');
 
     engine.send({'type': 'session.stop', 'sessionId': 'scr_1'});
     await _settle();
@@ -249,7 +279,11 @@ void main() {
       ..send(input('scr_2'));
     await _settle();
     expect(injector.events, hasLength(1), reason: 'only the current session');
-    expect(injector.events.single.toJson(), {'type': 'move', 'x': 0.5, 'y': 0.25});
+    expect(injector.events.single.toJson(), {
+      'type': 'move',
+      'x': 0.5,
+      'y': 0.25,
+    });
     expect(applied, hasLength(1));
 
     engine.send({'type': 'session.stop', 'sessionId': 'scr_2'});
@@ -296,5 +330,80 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 1100));
     expect(engine.requests, hasLength(1));
     expect(errors.single.code, MebiusErrorCode.tokenExpired);
+  });
+
+  test(
+    'a bad message or a failing injector does not drop the stream',
+    () async {
+      final errors = <MebiusError>[];
+      agent.onError.listen(errors.add);
+      await agent.connect();
+      await _settle();
+      engine.send(start('scr_1'));
+      engine.streams.last
+        ..add(utf8.encode('data: {not json\n\n'))
+        ..add(utf8.encode('data: [1,2]\n\n'));
+      engine.send({
+        'type': 'session.start',
+        'sessionId': 'scr_2',
+        'mode': 'control',
+        'userId': 7,
+      });
+      await _settle();
+      injector.fail = StateError('Accessibility permission missing');
+      engine
+        ..send(input('scr_2'))
+        ..send(input('scr_2'));
+      await _settle();
+      expect(errors, hasLength(1), reason: 'one input error per session');
+      expect(errors.single.code, MebiusErrorCode.permissionDenied);
+      expect(errors.single.message, contains('Accessibility'));
+      injector.fail = null;
+      engine.send(input('scr_2'));
+      await _settle();
+      expect(injector.events, hasLength(1), reason: 'stream still alive');
+      expect(engine.requests, hasLength(1), reason: 'no reconnect');
+      expect(agent.session?.userId, '', reason: 'a mistyped field falls back');
+    },
+  );
+
+  test('held input is released whenever a session ends', () async {
+    await agent.connect();
+    await _settle();
+    engine
+      ..send(start('scr_1'))
+      ..send(start('scr_2')); // switch
+    await _settle();
+    expect(injector.releases, 1);
+    engine.send({'type': 'session.stop', 'sessionId': 'scr_2'}); // stop
+    await _settle();
+    expect(injector.releases, 2);
+    engine.send(start('scr_3'));
+    await _settle();
+    await engine.streams.last.close(); // stream dropped
+    await _settle();
+    expect(injector.releases, 3);
+    await Future<void>.delayed(const Duration(milliseconds: 1100));
+    engine.send(start('scr_4'));
+    await _settle();
+    await agent.disconnect(); // disconnect
+    expect(injector.releases, 4);
+  });
+
+  test('a failed publish is reported and its capture released', () async {
+    publisher.failStart = StateError('no screen');
+    final errors = <MebiusError>[];
+    agent.onError.listen(errors.add);
+    await agent.connect();
+    await _settle();
+    engine.send(start('scr_1'));
+    await _settle();
+    expect(publisher.log, ['start scr_1', 'stop']);
+    expect(errors.single.message, contains('no screen'));
+  });
+
+  test('a client the caller passed in is not closed', () async {
+    await agent.dispose();
+    expect(engine.client.closed, isFalse);
   });
 }

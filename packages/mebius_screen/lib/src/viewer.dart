@@ -88,11 +88,10 @@ class InputBatcher {
     _timer ??= Timer(interval, () => unawaited(_flush()));
   }
 
-  /// Drops everything not yet sent.
-  void clear() {
+  /// Sends everything queued now rather than at the next tick.
+  Future<void> flush() {
     _timer?.cancel();
-    _timer = null;
-    _pending.clear();
+    return _flush();
   }
 
   Future<void> _flush() async {
@@ -131,8 +130,8 @@ class InputSender {
     required Future<String> Function() refreshToken,
     this.onToken,
     this.onRejected,
-  })  : _http = client,
-        _refreshToken = refreshToken;
+  }) : _http = client,
+       _refreshToken = refreshToken;
 
   /// Renew this long before `exp`.
   static const Duration refreshMargin = Duration(minutes: 1);
@@ -155,7 +154,8 @@ class InputSender {
   /// Sends one batch.
   Future<void> send(List<MebiusInputEvent> events) async {
     final exp = jwtExpiry(token);
-    if (exp != null && !clock.now().toUtc().isBefore(exp.subtract(refreshMargin))) {
+    if (exp != null &&
+        !clock.now().toUtc().isBefore(exp.subtract(refreshMargin))) {
       await _refresh();
     }
     var res = await _post(events);
@@ -184,13 +184,15 @@ class InputSender {
   }
 
   Future<http.Response> _post(List<MebiusInputEvent> events) => _http.post(
-        url,
-        headers: {
-          'Authorization': 'Bearer $token',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({'events': [for (final e in events) e.toJson()]}),
-      );
+    url,
+    headers: {
+      'Authorization': 'Bearer $token',
+      'Content-Type': 'application/json',
+    },
+    body: jsonEncode({
+      'events': [for (final e in events) e.toJson()],
+    }),
+  );
 }
 
 /// The admin side: watches a device's screen and, in a control session,
@@ -205,12 +207,15 @@ class InputSender {
 class MebiusScreenViewer {
   /// Creates a viewer for the engine at [engineUrl].
   MebiusScreenViewer({required this.engineUrl, http.Client? httpClient})
-      : _http = httpClient ?? http.Client();
+    : _http = httpClient ?? http.Client(),
+      _ownsHttp = httpClient == null;
 
   /// The engine base URL, e.g. `https://stream.mebius.io`.
   final Uri engineUrl;
 
   final http.Client _http;
+  final bool _ownsHttp;
+  final HeldInput _held = HeldInput();
   final _ended = StreamController<String>.broadcast();
   final ValueNotifier<MediaStream?> _stream = ValueNotifier(null);
 
@@ -247,8 +252,6 @@ class MebiusScreenViewer {
     if (_closed || _player != null) {
       throw StateError('A viewer watches one session; create another.');
     }
-    _sessionId = sessionId;
-    _token = token;
     final client = MebiusClient.internal(gateway: '$engineUrl', token: token);
     final player = client.createPlayer(
       mode: MebiusPlayerMode.lowLatency,
@@ -271,7 +274,19 @@ class MebiusScreenViewer {
           break;
       }
     });
-    await retryFor(() => player.play(sessionId), cancelled: () => _closed);
+    try {
+      await retryFor(() => player.play(sessionId), cancelled: () => _closed);
+    } on Object {
+      // Leave the viewer as it was, so watch() can be called again.
+      await _playerEvents?.cancel();
+      _playerEvents = null;
+      _player = null;
+      _client = null;
+      await client.disconnect();
+      rethrow;
+    }
+    _sessionId = sessionId;
+    _token = token;
     _stream.value = player.engine.remoteStream;
   }
 
@@ -289,7 +304,8 @@ class MebiusScreenViewer {
     if (sessionId == null || token == null) {
       throw StateError('Call watch() before enableControl().');
     }
-    _batcher?.clear();
+    unawaited(_stopControl());
+    late final InputBatcher batcher;
     final sender = InputSender(
       client: _http,
       url: engineUrl.resolve(
@@ -306,19 +322,43 @@ class MebiusScreenViewer {
           // The video keeps the token it has.
         }
       },
-      onRejected: (_) => disableControl(),
+      // A late answer for an earlier enableControl must not turn this one off.
+      onRejected: (_) {
+        if (identical(_batcher, batcher)) {
+          disableControl();
+        }
+      },
     );
-    _batcher = InputBatcher(sender.send);
+    _batcher = batcher = InputBatcher(sender.send);
   }
 
-  /// Stops sending input; queued input is dropped.
-  void disableControl() {
-    _batcher?.clear();
-    _batcher = null;
-  }
+  /// Stops sending input, after releasing every key and button the admin
+  /// still holds on the device.
+  void disableControl() => unawaited(_stopControl());
 
   /// Queues one input event; ignored unless control is enabled.
-  void sendInput(MebiusInputEvent event) => _batcher?.add(event);
+  void sendInput(MebiusInputEvent event) {
+    final b = _batcher;
+    if (b != null) {
+      _held.track(event);
+      b.add(event);
+    }
+  }
+
+  /// Sends the ups for everything held, e.g. when the view loses focus and
+  /// would never see the key-up.
+  @internal
+  void releaseHeld() => _held.release().forEach(sendInput);
+
+  Future<void> _stopControl() async {
+    final b = _batcher;
+    if (b == null) {
+      return;
+    }
+    _held.release().forEach(b.add);
+    _batcher = null;
+    await b.flush();
+  }
 
   /// Stops watching and releases the viewer. The session itself ends on the
   /// engine once no viewer is left for 60 s, or when your backend ends it.
@@ -327,11 +367,14 @@ class MebiusScreenViewer {
       return;
     }
     _closed = true;
-    disableControl();
+    await _stopControl();
     await _playerEvents?.cancel();
     _stream.value = null;
     await _client?.disconnect();
-    _http.close();
+    if (_ownsHttp) {
+      _http.close();
+    }
     await _ended.close();
+    _stream.dispose();
   }
 }

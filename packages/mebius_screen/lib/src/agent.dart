@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:clock/clock.dart';
+
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 import 'package:mebius/mebius.dart';
@@ -66,8 +68,10 @@ class _WebrtcScreenPublisher implements ScreenPublisher {
   }) async {
     // A per-session client: the publish token is the session's credential,
     // and Mebius.init's app-wide gateway is not this engine's concern.
-    final client =
-        MebiusClient.internal(gateway: '$_engineUrl', token: publishToken);
+    final client = MebiusClient.internal(
+      gateway: '$_engineUrl',
+      token: publishToken,
+    );
     _client = client;
     await client
         .createBroadcaster(
@@ -87,19 +91,19 @@ class _WebrtcScreenPublisher implements ScreenPublisher {
   }
 }
 
-/// Opens the primary display as a media stream, with no picker.
-///
-/// ponytail: "primary" is the first screen flutter_webrtc lists, which is the
-/// main display on macOS and Windows; a monitor choice is a later feature.
+/// Opens the primary display as a media stream, with no picker. Primary
+/// because that is the display the injectors drive, so a click lands where
+/// the admin saw it.
 Future<MediaStream> capturePrimaryScreen() async {
   final sources = await desktopCapturer.getSources(types: [SourceType.Screen]);
   if (sources.isEmpty) {
     throw StateError('No screen to capture.');
   }
+  final source = pickPrimary(sources, (s) => s.id, primaryScreenSourceId());
   return navigator.mediaDevices.getDisplayMedia({
     'audio': false,
     'video': {
-      'deviceId': {'exact': sources.first.id},
+      'deviceId': {'exact': source.id},
       // Screens are mostly still text: 15 fps keeps it readable for less.
       'mandatory': {'frameRate': 15.0},
     },
@@ -131,11 +135,12 @@ class MebiusScreenAgent {
     @visibleForTesting ScreenPublisher? publisher,
     @visibleForTesting InputInjector? injector,
     @visibleForTesting Random? random,
-  })  : _credentials = credentials,
-        _http = httpClient ?? http.Client(),
-        _publisher = publisher ?? _WebrtcScreenPublisher(engineUrl),
-        _injector = injector,
-        _random = random ?? Random();
+  }) : _credentials = credentials,
+       _http = httpClient ?? http.Client(),
+       _ownsHttp = httpClient == null,
+       _publisher = publisher ?? _WebrtcScreenPublisher(engineUrl),
+       _injector = injector,
+       _random = random ?? Random();
 
   /// A connection that delivers nothing, not even the 15 s ping, for this
   /// long is dead (a half-open socket), and is replaced.
@@ -146,6 +151,7 @@ class MebiusScreenAgent {
 
   final MebiusCredentialStore _credentials;
   final http.Client _http;
+  final bool _ownsHttp;
   final ScreenPublisher _publisher;
   InputInjector? _injector;
   final Random _random;
@@ -155,9 +161,18 @@ class MebiusScreenAgent {
   final _inputs = StreamController<MebiusInputEvent>.broadcast();
   final _errors = StreamController<MebiusError>.broadcast();
 
+  /// A connection that stays up this long has proven the engine reachable,
+  /// so the next drop starts the backoff from 1 s again. One that drops
+  /// sooner (an engine accepting and closing at once) keeps backing off.
+  static const Duration _stableAfter = Duration(seconds: 10);
+
   bool _running = false;
   Completer<void> _stop = Completer<void>();
   MebiusScreenSession? _session;
+
+  /// Input failed once in this session; further failures stay quiet so a
+  /// missing permission is one error, not one per mouse move.
+  bool _inputFailed = false;
 
   /// Session start/stop, one at a time and in arrival order.
   Future<void> _ops = Future<void>.value();
@@ -256,7 +271,9 @@ class MebiusScreenAgent {
   /// Disconnects and releases the agent.
   Future<void> dispose() async {
     await disconnect();
-    _http.close();
+    if (_ownsHttp) {
+      _http.close();
+    }
     await _sessions.close();
     await _ended.close();
     await _inputs.close();
@@ -271,14 +288,16 @@ class MebiusScreenAgent {
     while (!stop.isCompleted) {
       final abort = Completer<void>();
       try {
-        final req = http.AbortableRequest(
-          'GET',
-          engineUrl.resolve('/api/v1/screen/agent/events'),
-          abortTrigger: Future.any([abort.future, stop.future]),
-        )..headers.addAll({
-            'Authorization': 'Bearer $secret',
-            'Accept': 'text/event-stream',
-          });
+        final req =
+            http.AbortableRequest(
+                'GET',
+                engineUrl.resolve('/api/v1/screen/agent/events'),
+                abortTrigger: Future.any([abort.future, stop.future]),
+              )
+              ..headers.addAll({
+                'Authorization': 'Bearer $secret',
+                'Accept': 'text/event-stream',
+              });
         final res = await _http.send(req);
         if (res.statusCode == 401 || res.statusCode == 403) {
           _running = false;
@@ -293,12 +312,17 @@ class MebiusScreenAgent {
           break;
         }
         if (res.statusCode == 200) {
-          attempt = 0;
+          final openedAt = clock.now();
           final parser = SseParser();
-          await for (final chunk in res.stream
-              .transform(utf8.decoder)
-              .timeout(silenceLimit)) {
-            parser.add(chunk).forEach(_handle);
+          try {
+            await for (final chunk
+                in res.stream.transform(utf8.decoder).timeout(silenceLimit)) {
+              parser.add(chunk).forEach(_handle);
+            }
+          } finally {
+            if (clock.now().difference(openedAt) >= _stableAfter) {
+              attempt = 0;
+            }
           }
         } else {
           unawaited(res.stream.listen(null, onError: (_) {}).cancel());
@@ -321,33 +345,41 @@ class MebiusScreenAgent {
     await _queue(_endSession);
   }
 
+  /// One message. Nothing in it may end the event stream: a malformed event
+  /// is dropped, the next one still arrives.
   void _handle(String data) {
-    final Map<String, dynamic> m;
     try {
-      m = jsonDecode(data) as Map<String, dynamic>;
+      final m = jsonDecode(data);
+      if (m is Map<String, dynamic>) {
+        _dispatch(m);
+      }
     } on Object {
-      return;
+      // Malformed or unexpected: skip this message only.
     }
+  }
+
+  void _dispatch(Map<String, dynamic> m) {
     final id = m['sessionId'];
     if (id is! String) {
       return;
     }
+    T? field<T>(String k) => m[k] is T ? m[k] as T : null;
     switch (m['type']) {
       case 'session.start':
         final s = MebiusScreenSession(
           sessionId: id,
-          mode: m['mode'] as String? ?? 'view',
-          userId: m['userId'] as String? ?? '',
+          mode: field<String>('mode') ?? 'view',
+          userId: field<String>('userId') ?? '',
         );
-        final ice = (m['iceServers'] as List<dynamic>? ?? const [])
+        final ice = (field<List<dynamic>>('iceServers') ?? const [])
             .whereType<Map<String, dynamic>>()
             .toList();
         unawaited(
           _queue(
             () => _startSession(
               s,
-              m['publishToken'] as String? ?? '',
-              (m['maxBitrateKbps'] as num?)?.toInt() ?? 1500,
+              field<String>('publishToken') ?? '',
+              field<num>('maxBitrateKbps')?.toInt() ?? 1500,
               ice,
             ),
           ),
@@ -369,22 +401,30 @@ class MebiusScreenAgent {
     final s = _session;
     // Gated here as well as on the engine: a stray or late event must never
     // move the mouse outside a control session.
-    if (s == null || s.sessionId != sessionId || !s.isControl || input is! List) {
+    if (s == null ||
+        s.sessionId != sessionId ||
+        !s.isControl ||
+        input is! List) {
       return;
     }
-    final injector = _injector ??= platformInjector();
     for (final raw in input.whereType<Map<String, dynamic>>()) {
-      final e = MebiusInputEvent.fromJson(raw);
+      final MebiusInputEvent e;
       try {
-        injector.inject(e);
+        e = MebiusInputEvent.fromJson(raw);
+        // Built on first use, inside the try: a missing framework or symbol
+        // is an input error, not a dead event stream.
+        (_injector ??= platformInjector()).inject(e);
       } on Object catch (err) {
-        _emitError(
-          MebiusError(
-            MebiusErrorCode.unknown,
-            'Could not apply remote input.',
-            cause: err,
-          ),
-        );
+        if (!_inputFailed) {
+          _inputFailed = true;
+          _emitError(
+            MebiusError(
+              MebiusErrorCode.permissionDenied,
+              err is StateError ? err.message : 'Could not apply remote input.',
+              cause: err,
+            ),
+          );
+        }
         return;
       }
       if (!_inputs.isClosed) {
@@ -408,6 +448,7 @@ class MebiusScreenAgent {
       return;
     }
     _session = s;
+    _inputFailed = false;
     if (!_sessions.isClosed) {
       _sessions.add(s);
     }
@@ -419,9 +460,14 @@ class MebiusScreenAgent {
         iceServers: iceServers,
       );
     } on Object catch (e) {
-      // The session stays current: the engine ends it (publisher_left) and
-      // says so with session.stop.
       _emitError(MebiusError.from(e));
+      // Release whatever the attempt opened (the capture above all). The
+      // session stays current until the engine ends it (publisher_left).
+      try {
+        await _publisher.stop();
+      } on Object {
+        // Nothing more to release.
+      }
     }
   }
 
@@ -431,6 +477,8 @@ class MebiusScreenAgent {
       return;
     }
     _session = null;
+    // Nothing the admin pressed stays pressed once they are gone.
+    _injector?.releaseAll();
     try {
       await _publisher.stop();
     } on Object catch (_) {
@@ -441,8 +489,16 @@ class MebiusScreenAgent {
     }
   }
 
-  Future<void> _queue(Future<void> Function() op) =>
-      _ops = _ops.then((_) => op());
+  /// Runs [op] after every op queued before it. A failing op (they handle
+  /// their own errors; this is the backstop) never blocks the ones after it.
+  Future<void> _queue(Future<void> Function() op) {
+    return _ops = _ops
+        .then((_) => op())
+        .then<void>(
+          (_) {},
+          onError: (Object _) {},
+        );
+  }
 
   void _emitError(MebiusError e) {
     if (!_errors.isClosed) {

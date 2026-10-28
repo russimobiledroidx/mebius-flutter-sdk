@@ -87,7 +87,9 @@ void main() {
 
   group('InputSender', () {
     final now = DateTime.utc(2026, 10, 28, 9);
-    final url = Uri.parse('https://e.example/api/v1/screen/sessions/scr_1/input');
+    final url = Uri.parse(
+      'https://e.example/api/v1/screen/sessions/scr_1/input',
+    );
 
     test('posts the batch with the view token', () async {
       late http.Request sent;
@@ -181,11 +183,13 @@ void main() {
       fakeAsync((async) {
         var tries = 0;
         var done = false;
-        unawaited(retryFor(() async {
-          if (++tries < 4) {
-            throw StateError('not publishing yet');
-          }
-        }).then((_) => done = true));
+        unawaited(
+          retryFor(() async {
+            if (++tries < 4) {
+              throw StateError('not publishing yet');
+            }
+          }).then((_) => done = true),
+        );
         async.elapse(const Duration(seconds: 3));
         expect(tries, 4);
         expect(done, isTrue);
@@ -196,10 +200,12 @@ void main() {
       fakeAsync((async) {
         var tries = 0;
         Object? error;
-        unawaited(retryFor(() async {
-          tries++;
-          throw StateError('$tries');
-        }).catchError((Object e) => error = e));
+        unawaited(
+          retryFor(() async {
+            tries++;
+            throw StateError('$tries');
+          }).catchError((Object e) => error = e),
+        );
         async.elapse(const Duration(seconds: 20));
         expect(tries, 16); // t = 0, 1, … 15 s
         expect('$error', contains('16'));
@@ -221,4 +227,36 @@ void main() {
       throwsStateError,
     );
   });
+
+  test('flush sends what is queued at once', () {
+    fakeAsync((async) {
+      final batches = <List<MebiusInputEvent>>[];
+      unawaited(
+        (InputBatcher(
+          (e) async => batches.add(e),
+          interval: const Duration(seconds: 9),
+        )..add(_key('KeyA'))).flush(),
+      );
+      async.flushMicrotasks();
+      expect(batches.single.single.key, 'KeyA');
+      async.elapse(const Duration(seconds: 10));
+      expect(batches, hasLength(1), reason: 'the timer was cancelled');
+    });
+  });
+
+  test('close leaves a client the caller passed in open', () async {
+    final client = _Client();
+    await MebiusScreenViewer(
+      engineUrl: Uri.parse('https://e.example'),
+      httpClient: client,
+    ).close();
+    expect(client.closed, isFalse);
+  });
+}
+
+class _Client extends MockClient {
+  _Client() : super((_) async => http.Response('', 204));
+  bool closed = false;
+  @override
+  void close() => closed = true;
 }

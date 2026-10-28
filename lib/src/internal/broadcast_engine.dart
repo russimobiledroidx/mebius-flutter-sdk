@@ -108,7 +108,9 @@ class BroadcastEngine {
     } catch (e) {
       throw MebiusError(
         MebiusErrorCode.permissionDenied,
-        'Camera and/or microphone access was denied.',
+        source != null
+            ? 'The media source could not be opened.'
+            : 'Camera and/or microphone access was denied.',
         cause: e,
       );
     }
@@ -179,21 +181,24 @@ class BroadcastEngine {
 
   /// Stops publishing and releases capture resources.
   Future<void> stop() async {
+    // Capture and connection first, the goodbye to the gateway last: on a
+    // dead network the DELETE is the step that can stall, and the camera (or
+    // screen) must be off by then regardless.
     final resource = _resourceUrl;
     _resourceUrl = null;
-    if (resource != null) {
-      await signaling.deleteResource(resource);
-    }
     await _pc?.close();
     _pc = null;
     final stream = _localStream;
+    _localStream = null;
     if (stream != null) {
       for (final track in stream.getTracks()) {
         await track.stop();
       }
       await stream.dispose();
     }
-    _localStream = null;
+    if (resource != null) {
+      await signaling.deleteResource(resource);
+    }
   }
 
   /// Flips between the front- and rear-facing cameras.

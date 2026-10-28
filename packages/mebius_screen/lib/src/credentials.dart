@@ -37,13 +37,14 @@ class MebiusSecureCredentialStore implements MebiusCredentialStore {
   MebiusSecureCredentialStore({
     this.key = 'io.mebius.screen.device',
     FlutterSecureStorage? storage,
-  }) : _storage = storage ??
-            const FlutterSecureStorage(
-              // The login keychain. The data-protection keychain needs a
-              // keychain-access-groups entitlement, i.e. a signing team, which
-              // a fresh agent build does not have.
-              mOptions: MacOsOptions(usesDataProtectionKeychain: false),
-            );
+  }) : _storage =
+           storage ??
+           const FlutterSecureStorage(
+             // The login keychain. The data-protection keychain needs a
+             // keychain-access-groups entitlement, i.e. a signing team, which
+             // a fresh agent build does not have.
+             mOptions: MacOsOptions(usesDataProtectionKeychain: false),
+           );
 
   /// The storage key the credentials live under.
   final String key;
@@ -69,12 +70,12 @@ class MebiusSecureCredentialStore implements MebiusCredentialStore {
 
   @override
   Future<void> write(MebiusDeviceCredentials credentials) => _storage.write(
-        key: key,
-        value: jsonEncode({
-          'deviceId': credentials.deviceId,
-          'deviceSecret': credentials.deviceSecret,
-        }),
-      );
+    key: key,
+    value: jsonEncode({
+      'deviceId': credentials.deviceId,
+      'deviceSecret': credentials.deviceSecret,
+    }),
+  );
 
   @override
   Future<void> clear() => _storage.delete(key: key);

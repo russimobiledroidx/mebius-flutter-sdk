@@ -45,6 +45,9 @@ class SdpExchangeResult {
 /// past a cold edge's slowest observed answer (~6 s).
 const Duration kGatewayRequestTimeout = Duration(seconds: 15);
 
+/// Upper bound on the best-effort DELETE that ends a session.
+const Duration kDeleteTimeout = Duration(seconds: 3);
+
 /// Thin HTTP signaling client that talks to the Mebius gateway.
 ///
 /// Translates raw transport responses into [MebiusError]s using Mebius
@@ -212,9 +215,14 @@ class GatewaySignaling {
   }
 
   /// Tears down a previously created session resource.
+  ///
+  /// Bounded by [kDeleteTimeout]: a stop must not hang on a dead network,
+  /// and the gateway reaps an abandoned session on its own.
   Future<void> deleteResource(String resourceUrl) async {
     try {
-      await _http.delete(Uri.parse(resourceUrl), headers: _authHeaders);
+      await _http
+          .delete(Uri.parse(resourceUrl), headers: _authHeaders)
+          .timeout(kDeleteTimeout);
     } on Object {
       // Best-effort teardown; ignore failures during cleanup.
     }
