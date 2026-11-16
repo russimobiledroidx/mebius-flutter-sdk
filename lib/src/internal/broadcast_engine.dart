@@ -242,6 +242,9 @@ class BroadcastEngine {
   /// taken synchronously up front, so a second or concurrent `stop()` is a
   /// no-op rather than a double close.
   Future<void> stop() async {
+    // Capture and connection first, the goodbye to the gateway last: on a
+    // dead network the DELETE is the step that can stall, and the camera (or
+    // screen) must be off by then regardless.
     final resource = _resourceUrl;
     _resourceUrl = null;
     final pc = _pc;

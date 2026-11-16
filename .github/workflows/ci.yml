@@ -38,3 +38,12 @@ jobs:
 
       - name: Publish dry run
         run: flutter pub publish --dry-run
+
+      # packages/mebius_screen: desktop screen share, kept out of `mebius` so its
+      # desktop-only native dependencies never reach mobile apps.
+      - name: Screen package
+        working-directory: packages/mebius_screen
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test

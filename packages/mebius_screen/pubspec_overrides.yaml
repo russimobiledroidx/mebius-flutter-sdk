@@ -1,0 +1,5 @@
+# Development only: build against the mebius package in this repo. Not
+# published (tool/publish_mebius_screen.sh leaves it out).
+dependency_overrides:
+  mebius:
+    path: ../..

@@ -1,0 +1,4 @@
+# Development only; see ../pubspec_overrides.yaml.
+dependency_overrides:
+  mebius:
+    path: ../../..
