@@ -1,3 +1,27 @@
+## 0.8.0
+
+- `createBroadcaster` and `createPlayer`/`createMonitor` take `iceServers:` —
+  a list of RTCIceServer maps (`urls`, `username`, `credential`) for networks
+  that need TURN. Empty, the default, keeps the host/srflx-only behaviour of
+  every earlier release.
+- `createBroadcaster` takes `source:` — an app-supplied `MediaStream` (a camera
+  stream the app owns, a screen capture) published instead of opening the
+  camera and microphone. The stream is used exactly as given; none of the
+  built-in landscape capture constraints are applied, so a portrait camera
+  stream stays portrait. This is the hook a Flutter host uses to publish a
+  camera it opened itself, with its own beauty/AR processing already attached.
+- Broadcaster connection events. The broadcaster event stream now also emits
+  `MebiusBroadcasterEventType.connectionState` (carrying the new state:
+  `connected`, `disconnected`, `failed`, …) and
+  `MebiusBroadcasterEventType.error` (carrying a
+  `MebiusError(MebiusErrorCode.connectionFailed)`) when the peer connection
+  reports `failed`, or stays `disconnected` for more than 5 s. The SDK does not
+  reconnect — the app decides whether to start a new broadcast.
+- `createBroadcaster` takes `disposeSourceOnStop:` (default `true`). When
+  `false`, `stop()` still closes the peer connection and releases the gateway
+  resource but leaves an app-supplied `source` stream alive for the app to
+  reuse or dispose itself. The camera/microphone path is always torn down.
+
 ## 0.6.2
 
 - iOS live HLS reconnected every ~12 s because video_player clamps position to

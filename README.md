@@ -224,6 +224,49 @@ class _BroadcastPageState extends State<BroadcastPage> {
 }
 ```
 
+#### Broadcast a camera you opened yourself
+
+By default `createBroadcaster` opens the camera and microphone for you with
+landscape capture constraints. Pass `source:` to publish a `MediaStream` the
+app opened instead — a portrait camera at the resolution the device tier can
+afford, with any native beauty/AR processing already attached to its video
+track. The stream is published exactly as given; the built-in constraints are
+not applied, so a portrait stream stays portrait.
+
+```dart
+final broadcaster = client.createBroadcaster(
+  // The app owns this stream, so keep it after stop() to reuse it.
+  disposeSourceOnStop: false,
+  source: () async => navigator.mediaDevices.getUserMedia({
+    'audio': true,
+    'video': {
+      'facingMode': 'user',
+      'mandatory': {
+        'minWidth': '480',
+        'minHeight': '854', // portrait 9:16
+        'maxWidth': '720',
+        'maxHeight': '1280',
+        'maxFrameRate': '30',
+      },
+    },
+  }),
+);
+
+broadcaster.events.listen((event) {
+  switch (event.type) {
+    case MebiusBroadcasterEventType.connectionState:
+      debugPrint('connection: ${event.connectionState}');
+    case MebiusBroadcasterEventType.error:
+      // The SDK does not reconnect; restart the broadcast if you want to.
+      debugPrint('broadcast failed: ${event.error}');
+    default:
+      break;
+  }
+});
+
+await broadcaster.start('my-stream');
+```
+
 ### Watch
 
 ```dart
@@ -371,7 +414,7 @@ mode-toggling and a volume slider lives in [`example/lib/main.dart`](example/lib
 | `Mebius.init` | `static void init({required String appId, required String gateway})` | Configure the SDK once at startup. |
 | `Mebius.connect` | `static MebiusClient connect({required String token, List<MebiusDelivery> deliveries = const [], Future<String> Function()? getToken})` | Open an authenticated session. `getToken` renews the credential before it expires. |
 | `MebiusClient.updateToken` | `void updateToken(String token)` | Swap the credential in place. Throws for an empty token or one scoped to another stream. |
-| `MebiusClient.createBroadcaster` | `MebiusBroadcaster createBroadcaster({bool video = true, bool audio = true})` | Create a broadcaster. |
+| `MebiusClient.createBroadcaster` | `MebiusBroadcaster createBroadcaster({bool video = true, bool audio = true, int? maxBitrateKbps = 2500, Future<MediaStream> Function()? source, List<Map<String, dynamic>> iceServers = const [], bool disposeSourceOnStop = true})` | Create a broadcaster. `source` publishes a stream you opened; `disposeSourceOnStop: false` keeps it after stop. |
 | `MebiusClient.createPlayer` | `MebiusPlayer createPlayer({MebiusPlayerMode mode = MebiusPlayerMode.auto})` | Create a player. |
 | `MebiusClient.createMonitor` | `MebiusPlayer createMonitor()` | Player for a stream you interact with. |
 | `MebiusDelivery.listFromJson` | `static List<MebiusDelivery> listFromJson(Object? json)` | Parse the `deliveries` array from your token response. |

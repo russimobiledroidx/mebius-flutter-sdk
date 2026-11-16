@@ -212,4 +212,24 @@ void main() {
       );
     });
   });
+
+  test('ending a session gives up on a gateway that never answers', () {
+    fakeAsync((async) {
+      final signaling = GatewaySignaling(
+        gateway: 'https://gw.example',
+        token: 't',
+        httpClient: MockClient((_) => Completer<http.Response>().future),
+      );
+      var done = false;
+      unawaited(
+        signaling
+            .deleteResource('https://gw.example/whip/s/r')
+            .then((_) => done = true),
+      );
+      async.elapse(kDeleteTimeout - const Duration(milliseconds: 1));
+      expect(done, isFalse);
+      async.elapse(const Duration(milliseconds: 2));
+      expect(done, isTrue);
+    });
+  });
 }
