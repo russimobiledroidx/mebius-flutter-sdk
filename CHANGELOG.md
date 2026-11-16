@@ -1,15 +1,9 @@
 ## 0.8.0
 
-- `createBroadcaster` and `createPlayer`/`createMonitor` take `iceServers:` —
-  a list of RTCIceServer maps (`urls`, `username`, `credential`) for networks
-  that need TURN. Empty, the default, keeps the host/srflx-only behaviour of
-  every earlier release.
-- `createBroadcaster` takes `source:` — an app-supplied `MediaStream` (a camera
-  stream the app owns, a screen capture) published instead of opening the
-  camera and microphone. The stream is used exactly as given; none of the
-  built-in landscape capture constraints are applied, so a portrait camera
-  stream stays portrait. This is the hook a Flutter host uses to publish a
-  camera it opened itself, with its own beauty/AR processing already attached.
+- A supplied `createBroadcaster(source:)` is now published exactly as given —
+  none of the built-in landscape capture constraints are applied — so a
+  portrait camera a Flutter host opened itself (with its own beauty/AR
+  processing attached) stays portrait.
 - Broadcaster connection events. The broadcaster event stream now also emits
   `MebiusBroadcasterEventType.connectionState` (carrying the new state:
   `connected`, `disconnected`, `failed`, …) and
@@ -23,13 +17,23 @@
   reuse or dispose itself. The camera/microphone path is always torn down.
 - Broadcaster `stop()` is now fully best-effort: a failure closing the peer
   connection or stopping a track no longer skips the remaining teardown or the
-  gateway DELETE, so the camera is always released and the session always ended.
-  A mid-`start()` failure now releases the camera it had already opened instead
-  of leaving it on. `stop()` also bounds its gateway DELETE (3 s) so a dead
-  network cannot hang it.
+  gateway DELETE (introduced in 0.7.0), so the camera is always released and the
+  session always ended. A mid-`start()` failure now releases the camera it had
+  already opened instead of leaving it on.
 - **Potentially breaking:** `MebiusBroadcasterEventType` gains `connectionState`
   and `error`. An exhaustive `switch` over this enum without a default will no
   longer compile until those cases (or a default) are added.
+
+## 0.7.0
+
+- `createBroadcaster(source:)` publishes a stream the app opened itself (a
+  screen capture, say) instead of opening the camera and microphone.
+- `createBroadcaster(iceServers:)` and `createPlayer(iceServers:)` take
+  RTCIceServer maps for networks that need TURN. The default, none, is the
+  same configuration as before.
+- Stopping a broadcast releases the camera and the connection before telling
+  the gateway, and that last request now gives up after 3 s, so stop never
+  hangs on a dead network.
 
 ## 0.6.2
 
