@@ -153,10 +153,18 @@ class MebiusClient {
   /// setting is multiplied by the size of its audience — a number that looks
   /// generous for one host is a bandwidth bill for a thousand viewers.
   ///
-  /// [source] publishes a stream the app opened itself (a screen capture, say)
-  /// instead of opening the camera and microphone; [video]/[audio] then only
-  /// gate the call, the stream decides what is sent. The broadcaster owns it:
-  /// its tracks are stopped and it is disposed on stop.
+  /// [source] publishes a stream the app opened itself (a camera stream it
+  /// owns, a screen capture) instead of opening the camera and microphone;
+  /// [video]/[audio] then only gate the call, the stream decides what is sent.
+  /// The stream is used exactly as given — none of the built-in capture
+  /// constraints are applied — so a portrait camera stream stays portrait.
+  ///
+  /// [disposeSourceOnStop] controls who owns a [source] stream after `stop()`.
+  /// True (the default) keeps the long-standing behaviour: the broadcaster
+  /// stops its tracks and disposes it. False leaves the stream alive for the
+  /// app to reuse or dispose itself; `stop()` still closes the connection and
+  /// releases the gateway resource. It has no effect on the camera/microphone
+  /// path, which the broadcaster always tears down.
   ///
   /// [iceServers] are RTCIceServer maps (`urls`, `username`, `credential`) for
   /// a network that needs TURN. Empty, the default, is unchanged behaviour.
@@ -166,6 +174,7 @@ class MebiusClient {
     int? maxBitrateKbps = kDefaultMaxBitrateKbps,
     Future<MediaStream> Function()? source,
     List<Map<String, dynamic>> iceServers = const <Map<String, dynamic>>[],
+    bool disposeSourceOnStop = true,
   }) {
     _ensureConnected();
     if (!video && !audio) {
@@ -181,6 +190,7 @@ class MebiusClient {
       audio: audio,
       source: source,
       iceServers: iceServers,
+      disposeSourceOnStop: disposeSourceOnStop,
     );
     _broadcasters.add(broadcaster);
     return broadcaster;

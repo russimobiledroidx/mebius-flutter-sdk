@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_webrtc/flutter_webrtc.dart' show MediaStream;
 
 import 'package:mebius/src/internal/broadcast_engine.dart';
+import 'package:mebius/src/internal/connection_watch.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/mebius_error.dart';
 import 'package:mebius/src/mebius_events.dart';
@@ -30,6 +31,7 @@ class MebiusBroadcaster {
     int? maxBitrateKbps = kDefaultMaxBitrateKbps,
     Future<MediaStream> Function()? source,
     List<Map<String, dynamic>> iceServers = const <Map<String, dynamic>>[],
+    bool disposeSourceOnStop = true,
   }) : _engine = BroadcastEngine(
           signaling: signaling,
           video: video,
@@ -37,9 +39,31 @@ class MebiusBroadcaster {
           maxBitrateKbps: maxBitrateKbps,
           source: source,
           iceServers: iceServers,
-        );
+          disposeSourceOnStop: disposeSourceOnStop,
+        ) {
+    _watch = ConnectionWatch(
+      onState: (state) => _emit(
+        MebiusBroadcasterEvent(
+          MebiusBroadcasterEventType.connectionState,
+          connectionState: state,
+        ),
+      ),
+      onFailed: () => _emit(
+        const MebiusBroadcasterEvent(
+          MebiusBroadcasterEventType.error,
+          error: MebiusError(
+            MebiusErrorCode.connectionFailed,
+            'The broadcast connection failed. The SDK does not reconnect; '
+            'start a new broadcast to resume.',
+          ),
+        ),
+      ),
+    );
+    _engine.onConnectionState = _watch.report;
+  }
 
   final BroadcastEngine _engine;
+  late final ConnectionWatch _watch;
   final StreamController<MebiusBroadcasterEvent> _events =
       StreamController<MebiusBroadcasterEvent>.broadcast();
   Timer? _statsTimer;
@@ -48,7 +72,8 @@ class MebiusBroadcaster {
   /// Whether this broadcaster is currently live.
   bool get isBroadcasting => _engine.isRunning;
 
-  /// The stream of lifecycle events (`started`, `stopped`, `stats`).
+  /// The stream of lifecycle events (`started`, `stopped`, `stats`,
+  /// `connectionState`, `error`).
   Stream<MebiusBroadcasterEvent> get events => _events.stream;
 
   /// Internal: the live broadcast engine, used by `MebiusView`.
@@ -61,6 +86,13 @@ class MebiusBroadcaster {
   /// [MebiusErrorCode.connectionFailed]) on failure.
   Future<void> start(String streamId) async {
     _ensureUsable();
+    // Mirror the engine's own guard before touching the watch: resetting it on
+    // a call that the engine will ignore would clear a pending failure on a
+    // live broadcast.
+    if (_engine.isRunning) {
+      return;
+    }
+    _watch.reset();
     try {
       await _engine.start(streamId);
     } catch (e) {
@@ -76,6 +108,7 @@ class MebiusBroadcaster {
   Future<void> stop() async {
     _statsTimer?.cancel();
     _statsTimer = null;
+    _watch.dispose();
     await _engine.stop();
     _emit(const MebiusBroadcasterEvent(MebiusBroadcasterEventType.stopped));
   }
@@ -98,6 +131,7 @@ class MebiusBroadcaster {
     }
     _disposed = true;
     _statsTimer?.cancel();
+    _watch.dispose();
     await _engine.stop();
     await _events.close();
   }

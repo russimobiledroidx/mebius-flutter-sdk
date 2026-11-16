@@ -35,6 +35,26 @@ typedef OpenPeerConnection = Future<RTCPeerConnection> Function(
 Map<String, dynamic> peerConfiguration(List<Map<String, dynamic>> iceServers) =>
     {'iceServers': iceServers, 'sdpSemantics': 'unified-plan'};
 
+/// Reduces a flutter_webrtc `RTCPeerConnectionState`/`RTCIceConnectionState`
+/// enum name to the short lower-case token the SDK reports (`failed`,
+/// `disconnected`, `connected`, `completed`, `connecting`, `checking`,
+/// `closed`, `new`).
+///
+/// Collapsing both enums to one vocabulary lets a single handler decide failure
+/// regardless of which transport reported it. Order matters: `disconnected`
+/// contains `connected` as a substring, so it is tested first.
+String normalizeConnectionState(String enumName) {
+  final n = enumName.toLowerCase();
+  if (n.contains('completed')) return 'completed';
+  if (n.contains('failed')) return 'failed';
+  if (n.contains('closed')) return 'closed';
+  if (n.contains('disconnected')) return 'disconnected';
+  if (n.contains('connecting')) return 'connecting';
+  if (n.contains('connected')) return 'connected';
+  if (n.contains('checking')) return 'checking';
+  return 'new';
+}
+
 /// Drives camera/mic capture and the WHIP publish session.
 class BroadcastEngine {
   BroadcastEngine({
@@ -44,6 +64,7 @@ class BroadcastEngine {
     this.maxBitrateKbps = kDefaultMaxBitrateKbps,
     this.source,
     this.iceServers = const <Map<String, dynamic>>[],
+    this.disposeSourceOnStop = true,
     this.openPeerConnection = createPeerConnection,
   });
 
@@ -56,13 +77,28 @@ class BroadcastEngine {
   final int? maxBitrateKbps;
 
   /// Supplies the media to publish instead of the camera/microphone, e.g. a
-  /// screen capture. Its tracks are stopped and the stream disposed on [stop].
+  /// screen capture. See [disposeSourceOnStop] for whether [stop] disposes it.
   final Future<MediaStream> Function()? source;
 
   /// ICE servers (TURN/STUN) for the publish connection.
   final List<Map<String, dynamic>> iceServers;
 
+  /// Whether [stop] stops the tracks of and disposes a stream from [source].
+  ///
+  /// True (the default) keeps the long-standing behaviour: the engine owns the
+  /// media and tears it down on stop, whether it came from the camera or a
+  /// caller [source]. False applies only to a caller [source] — the engine
+  /// still closes the peer connection and releases the gateway resource, but
+  /// leaves the stream alive for the app to reuse or dispose itself. A
+  /// camera/microphone stream the engine opened is always disposed.
+  final bool disposeSourceOnStop;
+
   final OpenPeerConnection openPeerConnection;
+
+  /// Called with the normalised connection state each time the peer
+  /// connection or its ICE transport changes state. Set by the owning
+  /// broadcaster; never invoked before [start].
+  void Function(String state)? onConnectionState;
 
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
@@ -115,24 +151,42 @@ class BroadcastEngine {
       );
     }
 
-    final pc = await openPeerConnection(peerConfiguration(iceServers));
-    _pc = pc;
+    // Media is captured; from here any failure must release it (and the camera)
+    // rather than leave a half-open broadcast behind. stop() does exactly that,
+    // honouring disposeSourceOnStop, and DELETEs the resource if publish got
+    // that far.
+    try {
+      final pc = await openPeerConnection(peerConfiguration(iceServers));
+      _pc = pc;
 
-    for (final track in _localStream!.getTracks()) {
-      await pc.addTrack(track, _localStream!);
+      // Surface connection health. Both the peer-connection and the ICE
+      // transport report `failed`/`disconnected`; the owning broadcaster
+      // decides what counts as a failure. No reconnection happens here.
+      pc
+        ..onConnectionState =
+            ((s) => onConnectionState?.call(normalizeConnectionState(s.name)))
+        ..onIceConnectionState =
+            ((s) => onConnectionState?.call(normalizeConnectionState(s.name)));
+
+      for (final track in _localStream!.getTracks()) {
+        await pc.addTrack(track, _localStream!);
+      }
+
+      await preferH264(pc);
+      await _applyBitrateCap(pc);
+
+      final offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      final result = await signaling.publishOffer(streamId, offer.sdp ?? '');
+      _resourceUrl = result.resourceUrl;
+      await pc.setRemoteDescription(
+        RTCSessionDescription(result.answerSdp, 'answer'),
+      );
+    } on Object {
+      await stop();
+      rethrow;
     }
-
-    await preferH264(pc);
-    await _applyBitrateCap(pc);
-
-    final offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    final result = await signaling.publishOffer(streamId, offer.sdp ?? '');
-    _resourceUrl = result.resourceUrl;
-    await pc.setRemoteDescription(
-      RTCSessionDescription(result.answerSdp, 'answer'),
-    );
   }
 
   /// Caps what the video encoder may send.
@@ -180,22 +234,54 @@ class BroadcastEngine {
   }
 
   /// Stops publishing and releases capture resources.
+  ///
+  /// Every step is best-effort and independent: a throw from closing the peer
+  /// connection or stopping a track must not strand the others or skip the
+  /// gateway DELETE. Leaving the camera on, or the server session live, is
+  /// worse than any error this could surface, so none is surfaced. Ownership is
+  /// taken synchronously up front, so a second or concurrent `stop()` is a
+  /// no-op rather than a double close.
   Future<void> stop() async {
     // Capture and connection first, the goodbye to the gateway last: on a
     // dead network the DELETE is the step that can stall, and the camera (or
     // screen) must be off by then regardless.
     final resource = _resourceUrl;
     _resourceUrl = null;
-    await _pc?.close();
+    final pc = _pc;
     _pc = null;
     final stream = _localStream;
     _localStream = null;
-    if (stream != null) {
+
+    // Detach the state handlers first: a peer connection closing below still
+    // fires `closed` (and can fire a last `disconnected`/`failed`), and those
+    // must not reach the broadcaster after it has stopped.
+    pc
+      ?..onConnectionState = null
+      ..onIceConnectionState = null;
+    try {
+      await pc?.close();
+    } on Object catch (_) {}
+    try {
+      await pc?.dispose();
+    } on Object catch (_) {}
+
+    // A camera/mic stream the engine opened is always torn down. A caller
+    // `source` is only torn down when `disposeSourceOnStop` is true (the
+    // default) — otherwise the app keeps ownership of its own stream.
+    if (stream != null && (source == null || disposeSourceOnStop)) {
       for (final track in stream.getTracks()) {
-        await track.stop();
+        try {
+          await track.stop();
+        } on Object catch (_) {}
       }
-      await stream.dispose();
+      try {
+        await stream.dispose();
+      } on Object catch (_) {}
     }
+
+    // Last, and unconditional: the gateway reaps an abandoned session on its
+    // own, but a clean DELETE frees it now. Already best-effort and bounded by
+    // kDeleteTimeout inside the signaling client.
     if (resource != null) {
       await signaling.deleteResource(resource);
     }

@@ -31,6 +31,15 @@ enum MebiusBroadcasterEventType {
 
   /// A periodic statistics update is available.
   stats,
+
+  /// The underlying connection changed state. The accompanying event carries
+  /// the new state in [MebiusBroadcasterEvent.connectionState].
+  connectionState,
+
+  /// The broadcast connection failed. The accompanying event carries a
+  /// [MebiusError] in [MebiusBroadcasterEvent.error]. The SDK does not
+  /// reconnect — the application decides whether to start a new broadcast.
+  error,
 }
 
 /// Lifecycle states emitted by a `MebiusPlayer`.
@@ -95,8 +104,15 @@ class MebiusBroadcastStats {
 @immutable
 class MebiusBroadcasterEvent {
   /// Creates a broadcaster event of [type], optionally carrying [stats] (set
-  /// only when [type] is [MebiusBroadcasterEventType.stats]).
-  const MebiusBroadcasterEvent(this.type, {this.stats});
+  /// only for [MebiusBroadcasterEventType.stats]), [connectionState] (set only
+  /// for [MebiusBroadcasterEventType.connectionState]) or [error] (set only for
+  /// [MebiusBroadcasterEventType.error]).
+  const MebiusBroadcasterEvent(
+    this.type, {
+    this.stats,
+    this.connectionState,
+    this.error,
+  });
 
   /// The kind of broadcaster lifecycle event.
   final MebiusBroadcasterEventType type;
@@ -105,9 +121,19 @@ class MebiusBroadcasterEvent {
   /// [MebiusBroadcasterEventType.stats] events.
   final MebiusBroadcastStats? stats;
 
+  /// The new connection state (`connected`, `disconnected`, `failed`,
+  /// `completed`, ...), present only for
+  /// [MebiusBroadcasterEventType.connectionState] events.
+  final String? connectionState;
+
+  /// The failure, present only for [MebiusBroadcasterEventType.error] events.
+  final MebiusError? error;
+
   @override
   String toString() => 'MebiusBroadcasterEvent(${type.name}'
-      '${stats != null ? ', $stats' : ''})';
+      '${stats != null ? ', $stats' : ''}'
+      '${connectionState != null ? ', $connectionState' : ''}'
+      '${error != null ? ', $error' : ''})';
 }
 
 /// Snapshot of playback statistics delivered with a `stats` event.

@@ -1,3 +1,29 @@
+## 0.8.0
+
+- A supplied `createBroadcaster(source:)` is now published exactly as given —
+  none of the built-in landscape capture constraints are applied — so a
+  portrait camera a Flutter host opened itself (with its own beauty/AR
+  processing attached) stays portrait.
+- Broadcaster connection events. The broadcaster event stream now also emits
+  `MebiusBroadcasterEventType.connectionState` (carrying the new state:
+  `connected`, `disconnected`, `failed`, …) and
+  `MebiusBroadcasterEventType.error` (carrying a
+  `MebiusError(MebiusErrorCode.connectionFailed)`) when the peer connection
+  reports `failed`, or stays `disconnected` for more than 5 s. The SDK does not
+  reconnect — the app decides whether to start a new broadcast.
+- `createBroadcaster` takes `disposeSourceOnStop:` (default `true`). When
+  `false`, `stop()` still closes the peer connection and releases the gateway
+  resource but leaves an app-supplied `source` stream alive for the app to
+  reuse or dispose itself. The camera/microphone path is always torn down.
+- Broadcaster `stop()` is now fully best-effort: a failure closing the peer
+  connection or stopping a track no longer skips the remaining teardown or the
+  gateway DELETE (introduced in 0.7.0), so the camera is always released and the
+  session always ended. A mid-`start()` failure now releases the camera it had
+  already opened instead of leaving it on.
+- **Potentially breaking:** `MebiusBroadcasterEventType` gains `connectionState`
+  and `error`. An exhaustive `switch` over this enum without a default will no
+  longer compile until those cases (or a default) are added.
+
 ## 0.7.0
 
 - `createBroadcaster(source:)` publishes a stream the app opened itself (a
