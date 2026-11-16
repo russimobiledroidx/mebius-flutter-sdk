@@ -42,9 +42,19 @@ class ConnectionWatch {
 
   Timer? _grace;
   bool _failed = false;
+  bool _disposed = false;
+  String? _last;
 
   /// Feeds one normalised state into the watch.
+  ///
+  /// The peer connection and its ICE transport are both wired to this, so the
+  /// same state arrives twice; an immediate repeat is dropped so an app sees
+  /// one event per real change. Reports after [dispose] are ignored.
   void report(String state) {
+    if (_disposed || state == _last) {
+      return;
+    }
+    _last = state;
     onState(state);
     switch (state) {
       case 'failed':
@@ -53,6 +63,7 @@ class ConnectionWatch {
         _grace ??= Timer(graceWindow, _raise);
       case 'connected':
       case 'completed':
+      case 'closed':
         _grace?.cancel();
         _grace = null;
     }
@@ -68,18 +79,22 @@ class ConnectionWatch {
     onFailed();
   }
 
-  /// Re-arms the watch for a fresh broadcast: forgets the previous failure and
-  /// any pending grace window.
+  /// Re-arms the watch for a fresh broadcast: forgets the previous failure,
+  /// the last state, and any pending grace window, and re-enables reporting
+  /// after a [dispose].
   void reset() {
     _grace?.cancel();
     _grace = null;
     _failed = false;
+    _disposed = false;
+    _last = null;
   }
 
-  /// Cancels any pending grace timer so a stopped broadcast cannot later raise
-  /// a failure.
+  /// Cancels any pending grace timer and ignores further reports, so a stopped
+  /// broadcast cannot later raise a failure.
   void dispose() {
     _grace?.cancel();
     _grace = null;
+    _disposed = true;
   }
 }

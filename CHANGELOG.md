@@ -21,6 +21,15 @@
   `false`, `stop()` still closes the peer connection and releases the gateway
   resource but leaves an app-supplied `source` stream alive for the app to
   reuse or dispose itself. The camera/microphone path is always torn down.
+- Broadcaster `stop()` is now fully best-effort: a failure closing the peer
+  connection or stopping a track no longer skips the remaining teardown or the
+  gateway DELETE, so the camera is always released and the session always ended.
+  A mid-`start()` failure now releases the camera it had already opened instead
+  of leaving it on. `stop()` also bounds its gateway DELETE (3 s) so a dead
+  network cannot hang it.
+- **Potentially breaking:** `MebiusBroadcasterEventType` gains `connectionState`
+  and `error`. An exhaustive `switch` over this enum without a default will no
+  longer compile until those cases (or a default) are added.
 
 ## 0.6.2
 

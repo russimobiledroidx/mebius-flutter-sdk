@@ -92,5 +92,45 @@ void main() {
         expect(failures, 0);
       });
     });
+
+    test('connecting is not recovery: a flap that never reconnects fails once',
+        () {
+      fakeAsync((async) {
+        var failures = 0;
+        final w = ConnectionWatch(
+          onState: (_) {},
+          onFailed: () => failures++,
+        )..report('disconnected');
+        async.elapse(const Duration(seconds: 2));
+        // WebRTC goes disconnected -> connecting while it tries to recover.
+        // That is not `connected`, so the grace window keeps running from the
+        // first disconnect; it must still fail.
+        w.report('connecting');
+        async.elapse(const Duration(seconds: 4));
+        expect(failures, 1);
+      });
+    });
+
+    test('a second disconnect after a real recovery gets its own grace window',
+        () {
+      fakeAsync((async) {
+        var failures = 0;
+        final w = ConnectionWatch(
+          onState: (_) {},
+          onFailed: () => failures++,
+        )..report('disconnected');
+        async.elapse(const Duration(seconds: 3));
+        w.report('connected'); // recovered: cancels the first window
+        async.elapse(const Duration(seconds: 10));
+        expect(failures, 0, reason: 'first episode cleared');
+        // A fresh disconnect must start counting from zero, not inherit the
+        // already-elapsed time.
+        w.report('disconnected');
+        async.elapse(const Duration(seconds: 4));
+        expect(failures, 0, reason: 'still inside the second window');
+        async.elapse(const Duration(seconds: 2));
+        expect(failures, 1);
+      });
+    });
   });
 }

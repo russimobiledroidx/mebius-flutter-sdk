@@ -6,23 +6,27 @@ import 'package:mebius/src/mebius_broadcaster.dart';
 import 'package:mebius/src/mebius_error.dart';
 import 'package:mebius/src/mebius_events.dart';
 
-/// What an app sees on the broadcaster's event stream when the connection
-/// drops. The engine's `onConnectionState` is the seam the live peer
-/// connection fires through; driving it directly needs no native WebRTC.
+/// How the broadcaster maps engine connection states onto its event stream,
+/// and that a state arriving after stop raises nothing. The engine's
+/// `onConnectionState` is the seam the live peer connection fires through;
+/// driving it directly needs no native WebRTC. (The pc -> engine wiring itself
+/// is covered in broadcast_wiring_test.)
 GatewaySignaling _signaling() => GatewaySignaling(
       gateway: 'https://gw.example',
       token: 't',
       httpClient: MockClient((_) async => http.Response('', 404)),
     );
 
-void main() {
-  test('a failed connection emits connectionState then an error event',
-      () async {
-    final b = MebiusBroadcaster.internal(
+MebiusBroadcaster _broadcaster() => MebiusBroadcaster.internal(
       signaling: _signaling(),
       video: true,
       audio: false,
     );
+
+void main() {
+  test('a failed connection emits connectionState then an error event',
+      () async {
+    final b = _broadcaster();
     final events = <MebiusBroadcasterEvent>[];
     final sub = b.events.listen(events.add);
 
@@ -44,11 +48,7 @@ void main() {
   });
 
   test('a brief disconnect that recovers emits states but no error', () async {
-    final b = MebiusBroadcaster.internal(
-      signaling: _signaling(),
-      video: true,
-      audio: false,
-    );
+    final b = _broadcaster();
     final events = <MebiusBroadcasterEvent>[];
     final sub = b.events.listen(events.add);
 
@@ -61,6 +61,30 @@ void main() {
       isTrue,
     );
     expect(events.map((e) => e.connectionState), ['disconnected', 'connected']);
+
+    await sub.cancel();
+    await b.dispose();
+  });
+
+  test('a state arriving after stop raises nothing', () async {
+    final b = _broadcaster();
+    final events = <MebiusBroadcasterEvent>[];
+    final sub = b.events.listen(events.add);
+
+    await b.stop(); // disposes the watch
+    b.engine.onConnectionState!('failed');
+    await Future<void>.delayed(Duration.zero);
+
+    // `stopped` is expected; a failure or connectionState after stop is not.
+    expect(
+      events.where(
+        (e) =>
+            e.type == MebiusBroadcasterEventType.error ||
+            e.type == MebiusBroadcasterEventType.connectionState,
+      ),
+      isEmpty,
+      reason: 'no error or connectionState after stop',
+    );
 
     await sub.cancel();
     await b.dispose();

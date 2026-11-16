@@ -86,6 +86,12 @@ class MebiusBroadcaster {
   /// [MebiusErrorCode.connectionFailed]) on failure.
   Future<void> start(String streamId) async {
     _ensureUsable();
+    // Mirror the engine's own guard before touching the watch: resetting it on
+    // a call that the engine will ignore would clear a pending failure on a
+    // live broadcast.
+    if (_engine.isRunning) {
+      return;
+    }
     _watch.reset();
     try {
       await _engine.start(streamId);
