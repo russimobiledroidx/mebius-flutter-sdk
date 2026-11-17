@@ -25,3 +25,6 @@ example/.flutter-plugins-dependencies
 
 # Its own package, published (if ever) on its own.
 packages/
+
+# Stray local Android scaffold (holds local.properties); this package has no native code.
+/android/

@@ -6,6 +6,8 @@
 // Internal implementation detail; not part of the documented public surface.
 // ignore_for_file: public_member_api_docs
 
+import 'dart:async';
+
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:mebius/src/internal/gateway_signaling.dart';
 import 'package:mebius/src/mebius_error.dart';
@@ -66,7 +68,12 @@ class BroadcastEngine {
     this.iceServers = const <Map<String, dynamic>>[],
     this.disposeSourceOnStop = true,
     this.openPeerConnection = createPeerConnection,
+    this.muteMicrophone = admMuteMicrophone,
   });
+
+  /// Mutes the microphone at the audio device module (process-wide). Injected
+  /// for tests; see [setMicEnabled] for why the mute is not a track toggle.
+  final Future<void> Function({required bool muted}) muteMicrophone;
 
   final GatewaySignaling signaling;
   final bool video;
@@ -102,6 +109,7 @@ class BroadcastEngine {
 
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
+  bool _micEnabled = true;
   String? _resourceUrl;
   bool _usingFrontCamera = true;
 
@@ -156,6 +164,11 @@ class BroadcastEngine {
     // honouring disposeSourceOnStop, and DELETEs the resource if publish got
     // that far.
     try {
+      // A mute set before start (or kept across a restart) is in place
+      // before the first packet.
+      if (!_micEnabled) {
+        await _applyMic();
+      }
       final pc = await openPeerConnection(peerConfiguration(iceServers));
       _pc = pc;
 
@@ -279,6 +292,14 @@ class BroadcastEngine {
       } on Object catch (_) {}
     }
 
+    // The ADM mute is process-wide: leave the microphone usable for whatever
+    // comes next. [_micEnabled] is kept, so a restart publishes muted again.
+    if (!_micEnabled) {
+      try {
+        await muteMicrophone(muted: false);
+      } on Object catch (_) {}
+    }
+
     // Last, and unconditional: the gateway reaps an abandoned session on its
     // own, but a clean DELETE frees it now. Already best-effort and bounded by
     // kDeleteTimeout inside the signaling client.
@@ -301,10 +322,28 @@ class BroadcastEngine {
     _usingFrontCamera = !_usingFrontCamera;
   }
 
-  /// Enables or disables the outgoing microphone track.
+  /// Mutes or unmutes the outgoing microphone. Works before [start] too.
+  ///
+  /// Muted at the audio device module, never `track.enabled = false`: a
+  /// disabled audio track makes libwebrtc stop recording (`MuteStream: ADM:1`
+  /// → `StopRecording` on Android), so the publish carries no audio packets at
+  /// all. The CDN relay then writes a video-only FLV under an audio header and
+  /// web viewers' MSE buffers (audio ∩ video) stall until unmute. An ADM mute
+  /// keeps recording and feeds zeros, so a silent audio track keeps flowing.
   void setMicEnabled({required bool enabled}) {
-    for (final track in _localStream?.getAudioTracks() ?? <MediaStreamTrack>[]) {
-      track.enabled = enabled;
+    _micEnabled = enabled;
+    unawaited(_applyMic());
+  }
+
+  /// Falls back to the track toggle only where the ADM mute is unavailable.
+  Future<void> _applyMic() async {
+    final enabled = _micEnabled;
+    try {
+      await muteMicrophone(muted: !enabled);
+    } on Object catch (_) {
+      for (final track in _localStream?.getAudioTracks() ?? <MediaStreamTrack>[]) {
+        track.enabled = enabled;
+      }
     }
   }
 
@@ -368,3 +407,11 @@ final List<RTCRtpCodecCapability> h264FirstCodecs = <RTCRtpCodecCapability>[
   RTCRtpCodecCapability(mimeType: 'video/H264', clockRate: 90000),
   RTCRtpCodecCapability(mimeType: 'video/VP8', clockRate: 90000),
 ];
+
+/// The default [BroadcastEngine.muteMicrophone]: mute at the audio device
+/// module. iOS uses `inputMixer`, which keeps the audio engine running (so
+/// silence keeps flowing) and plays no mute sound; a no-op elsewhere.
+Future<void> admMuteMicrophone({required bool muted}) async {
+  await Helper.setMicrophoneMuteMode(MicrophoneMuteMode.inputMixer);
+  await Helper.setMicrophoneMuted(muted);
+}

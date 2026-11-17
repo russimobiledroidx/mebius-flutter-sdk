@@ -1,3 +1,19 @@
+## 0.8.1
+
+- `MebiusBroadcaster.setMicEnabled(enabled: false)` no longer stalls web
+  viewers. It used to disable the audio track, which makes libwebrtc stop the
+  recorder (Android: `MuteStream: ADM:1` → `StopRecording`): the broadcast then
+  carried no audio at all, the CDN relay wrote a video-only FLV under an audio
+  header, and browser players (MSE buffers audio ∩ video) sat on a spinner
+  until the host unmuted. The mic is now muted at the audio device module
+  instead: recording keeps running and sends silence. iOS uses the
+  `inputMixer` mute mode (no mute sound). Falls back to the old track toggle
+  where the ADM mute is unavailable.
+- `setMicEnabled` now also works before `start()`: a host muted on go-live sends
+  no audio from the first packet, and the mute survives a `stop()`/`start()`
+  restart. `stop()` releases the ADM mute, which is process-wide.
+- Requires `flutter_webrtc` ^1.6.0 (was ^1.5.0) for the ADM mute API.
+
 ## 0.8.0
 
 - A supplied `createBroadcaster(source:)` is now published exactly as given —
