@@ -13,3 +13,6 @@ linter:
   rules:
     public_member_api_docs: true
     lines_longer_than_80_chars: false
+    # FFI callbacks take positional bools; analyzer versions disagree on
+    # whether an ignore is needed, so the rule is off for this package.
+    avoid_positional_boolean_parameters: false
